@@ -1,0 +1,39 @@
+Byte-compiled / optimized / DLL files
+
+pycache/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+*.dll
+
+C-Engine Build Artifacts
+
+build/
+dist/
+*.egg-info/
+*.o
+*.obj
+*.exe
+
+Environment / IDE
+
+.vscode/
+.idea/
+.venv
+env/
+venv/
+bin/
+lib/
+develop-eggs/
+eggs/
+lib64/
+parts/
+sdist/
+var/
+pip-wheel-metadata/
+
+Local data or logs
+
+*.log
+benchmarks/.pytest_cache/
