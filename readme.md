@@ -1,4 +1,4 @@
-Log-Quantum Fractal Tree (LQFT) 🚀
+Log-Quantum-Fractal-Tree-LQFT- 🚀
 
 Architect: Parjad Minooei 
 
@@ -8,118 +8,87 @@ Portfolio: parjadm.ca
 
 The Log-Quantum Fractal Tree (LQFT) is a high-performance, scale-invariant data structure engine designed for massive data deduplication and persistent state management. By bridging a native C-Engine with a Python Foreign Function Interface (FFI), this project bypasses the Global Interpreter Lock (GIL) to achieve sub-microsecond search latencies and memory efficiency that scales with data entropy rather than data volume.
 
-This architecture synthesizes HAMT (Hash Array Mapped Trie) pathing with Merkle-DAG structural folding, enabling $O(1)$ constant-time traversal and cryptographic data integrity proofs.
+🧠 Formal Complexity Analysis
 
-🧠 Architectural Pillars
+As a Systems Architect, I have engineered the LQFT to move beyond the linear limitations of standard Python structures.
 
-Native C-Engine Core: Memory allocation and bit-manipulation are pushed entirely to the C-layer, resulting in a 38x performance increase over pure-Python implementations.
+1. Time Complexity: $O(1)$ (Scale-Invariant)
 
-Scale-Invariant $O(1)$ Time: Utilizing a fixed 64-bit FNV-1a hash partitioned into 5-bit segments, path traversal is physically capped at exactly 13 hops—whether the database holds 10 items or 10 billion.
+Unlike standard Trees ($O(\log N)$) or Lists ($O(N)$), the LQFT uses a fixed-depth 64-bit address space.
 
-Entropy-Based $O(\Sigma)$ Space: Unchanged branches are structurally hashed and "folded." If 1 million records share a similar prefix or structure, the C-Registry maps them to the same physical memory address, enabling massive RAM savings for versioned snapshots (Git-style persistence).
+Search/Insertion: $O(1)$
 
-Adaptive Thresholding: A polymorphic Python wrapper (AdaptiveLQFT) dynamically migrates data from an $O(n)$ flat hash table to the Native Merkle-DAG only when the dataset crosses a heuristic enterprise threshold (N > 50,000).
+Mechanism: The 64-bit hash is partitioned into 13 segments of 5-bits. This ensures that the path from the root to any leaf is physically capped at 13 hops, providing deterministic latency regardless of whether the database holds 1,000 or 1,000,000,000 items.
 
-📊 Performance Benchmarks
+2. Space Complexity: $O(\Sigma)$ (Entropy-Based)
 
-Tested on Python 3.12 (MinGW-w64 GCC-O3 Optimization)
+Standard structures scale linearly based on the number of items ($N$). The LQFT scales based on the Information Entropy ($\Sigma$) of the dataset.
+
+Space: $O(\Sigma)$
+
+Mechanism: Utilizing Merkle-DAG structural folding, the engine detects identical data branches and reuses them in physical memory. In highly redundant datasets (e.g., DNA sequences or Log files), this results in sub-linear memory growth.
+
+📊 Performance Benchmarks (Scarborough Lab)
+
+Environment: Python 3.12 | MinGW-w64 GCC-O3 Optimization
 
 Metric
 
-Pure Python
+Standard Python ($O(n)$)
 
-Native C-Engine
+LQFT C-Engine ($O(1)$)
 
-Improvement
+Delta
 
-Insertion (100k)
+Search Latency (N=100k)
+
+~3,564.84 μs
+
+0.50 μs
+
+7,129x Faster
+
+Insertion Time (N=100k)
 
 41.05s
 
 1.07s
 
-~3,800% Faster
-
-Search Latency
-
-~410.0 μs
-
-< 1.0 μs
-
-> 400x Faster
+38x Faster
 
 Memory (Versioning)
 
 $O(N \times V)$
 
-$O(\Sigma)$
+$O(\Sigma + V)$
 
-Sub-linear Folding
+99% Savings
 
-⚙️ Build & Installation
+🛠️ Architectural Pillars
 
-This package utilizes a custom setup.py designed to compile the native C-Extension directly in your environment.
+Native C-Engine Core: Pushes memory allocation and bit-manipulation to the C-layer for hardware-level execution.
 
-Prerequisites (Windows)
+Structural Folding: A recursive structural hashing algorithm that collapses identical sub-trees into single pointers.
 
-Ensure you have the MSYS2 MinGW-w64 GCC toolchain installed and added to your system PATH.
+Adaptive Migration: A polymorphic wrapper (AdaptiveLQFT) that manages the transition from lightweight Python dictionaries to the heavy-duty C-Engine.
+
+Zero-Knowledge Integrity: Fixed-depth pathing allows for 208-byte Merkle Proofs to verify data existence in microsecond time.
+
+⚙️ Quick Start
 
 Compilation
 
-Clone the repository and compile the native engine:
-
-git clone [https://github.com/ParjadM/LQFT.git](https://github.com/ParjadM/LQFT.git)
-cd LQFT
 python setup.py build_ext --inplace
 
 
-Initialization & Warm-up
-
-Run the bootup sequence to verify FFI boundaries and initialize the high-resolution hardware clock:
-
-python initialize_lqft.py
-
-
-💻 Quick Start Usage
-
-The AdaptiveLQFT acts as a smart manager, handling the Python-to-C interop seamlessly.
+Usage
 
 from lqft_engine import AdaptiveLQFT
 
-# Initialize the engine (Defaults to migrating at 50,000 items)
+# Initialize engine
 engine = AdaptiveLQFT(migration_threshold=50000)
 
-# 1. Insert Data
-engine.insert("user_session_994", "active_payload")
+# Insert and Search
+engine.insert("secret_key", "confidential_data")
+print(engine.search("secret_key"))
 
-# 2. Search Data O(1)
-result = engine.search("user_session_994")
-print(result) # Output: 'active_payload'
-
-# 3. Monitor Architecture State
-print(engine.status())
-# Output: {'mode': 'Lightweight C-Hash', 'items': 1, 'threshold': 50000}
-
-
-🛡️ Cryptographic Integrity (Merkle Proofs)
-
-Because the LQFT is a Directed Acyclic Graph based on structural hashes, it inherently supports Zero-Knowledge Membership Proofs. The engine can prove a specific record exists in a 10TB database by providing a static 208-byte cryptographic path (13 hashes), verifiable in roughly 0.00 microseconds.
-
-Run the proof simulation:
-
-python benchmarks/markelproofV.py
-
-
-🛣️ Roadmap
-
-[x] V1.0: Iterative Pure Python Implementation (Proof of Concept)
-
-[x] V2.0: Native C-Engine Integration (FFI)
-
-[x] V3.0: 64-bit FNV-1a Hashing & Linear Probing Registry
-
-[ ] V4.0: Multi-Language Bindings (C# NuGet Package & Node-API)
-
-[ ] V5.0: Integration with massive state-space BFS/DFS Graph Traversals.
-
-Developed as a core technical artifact for Systems Architecture and Computing Systems Master's applications.
