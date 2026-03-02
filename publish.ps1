@@ -10,7 +10,7 @@ Write-Host "==========================================================" -Foregro
 # 1. THE TOTAL PURGE (Removing all non-core experimental files)
 Write-Host "[*] Purging all experimental benchmarks and technical guides..." -ForegroundColor Yellow
 $Extras = @(
-    # Python Benchmarks & Tests
+    # Python Benchmarks & experimental tests
     "demo_lqft.py", 
     "stress_test_memory_win.py", 
     "three_sum_lqft_test.py", 
@@ -20,7 +20,6 @@ $Extras = @(
     "graph_vs_lqft.py", 
     "the_architects_choice.py", 
     "comprehensive_benchmark.py", 
-    "benchmark.py", 
     "adaptive_benchmark.py", 
     "leetcode_187_test.py", 
     "complexity_crossover.py", 
@@ -32,9 +31,10 @@ $Extras = @(
     "advanced_lqft_stress_suite.py",
     "lqft_final_validation.py",
     "test_lqft.py",
-    "test_pure_python_ds.py",
-    "pure_python_ds.py",
     "lqft.py",
+
+    # Note: We are KEEPING test_pure_python_ds.py and pure_python_ds.py
+    # because they are required for the GitHub Actions CI/CD Pipeline.
 
     # Documentation & Guides (Kept in Canvas, removed from Repo for 'Clean' look)
     "lqft_blog_post.md",
@@ -77,7 +77,7 @@ Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 Write-Host "[*] Staging core engine and release manifest..." -ForegroundColor Cyan
 git add .
 # Using --allow-empty in case everything was already staged
-git commit -m "release: $Version - Final production cleanup of experimental artifacts" --allow-empty
+git commit -m "release: $Version - Final production cleanup and CI fix" --allow-empty
 git push origin main
 
 # 4. PYPI TRIGGER (Tagging) - Handling if tag already exists
