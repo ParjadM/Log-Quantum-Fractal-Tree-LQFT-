@@ -10,14 +10,17 @@ Write-Host "==========================================================" -Foregro
 
 # 1. THE TOTAL PURGE (Cleaning experimental artifacts for a clean portfolio)
 Write-Host "[*] Purging experimental scripts and old verification suites..." -ForegroundColor Yellow
+
+# SYSTEM ARCHITECT FIX: Removed validation.py and benchmark.py from the purge list 
+# so they are successfully pushed to GitHub for the CI/CD Pipeline to execute.
 $Extras = @(
-    "leak_test.py", "leak_verification.py", "benchmark.py", "comprehensive_benchmark.py", 
+    "leak_test.py", "leak_verification.py", "comprehensive_benchmark.py", 
     "adaptive_benchmark.py", "trie_vs_lqft_benchmark.py", "graph_vs_lqft.py", 
     "the_architects_choice.py", "complexity_demonstrator.py", "complexity_crossover.py", 
     "leetcode_187_test.py", "memory_benchmark.py", "perplexity_benchmark_suite.py", 
-    "advanced_lqft_stress_suite.py", "lqft_final_validation.py", "three_sum_lqft_test.py",
+    "advanced_lqft_stress_suite.py", "three_sum_lqft_test.py",
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
-    "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py", "validation.py",
+    "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
     "dashboard_info.md"
 )
 
