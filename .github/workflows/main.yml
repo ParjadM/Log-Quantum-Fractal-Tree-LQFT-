@@ -1,0 +1,35 @@
+name: LQFT CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install setuptools wheel pytest
+
+    - name: Compile C-Engine
+      run: |
+        python setup.py build_ext --inplace
+
+    - name: Run Pytest Suite
+      run: |
+        # We run the pure python tests and the engine verification
+        pytest test_pure_python_ds.py -v
+        python benchmark.py

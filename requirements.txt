@@ -1,0 +1,6 @@
+Core dependencies for building and testing the LQFT Engine
+
+setuptools>=61.0
+wheel
+pytest>=7.0
+tracemalloc
