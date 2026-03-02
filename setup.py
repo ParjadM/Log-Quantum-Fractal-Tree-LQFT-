@@ -3,44 +3,46 @@ import os
 import sys
 
 # Systems Architect Logic: Cross-Platform Compiler Detection
-# We handle the MSVC vs GCC flag difference dynamically.
-# Since you are using MSYS2/MinGW, we target GCC flags (-O3) to avoid the /O2 error.
 extra_compile_args = []
 
 if os.name == 'nt':
-    # Check if the environment is MinGW/GCC (MSYS2) vs standard Windows (MSVC)
-    # This prevents the 'linker input file not found: /O2' error seen in previous builds.
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
         extra_compile_args = ['-O3']
     else:
         extra_compile_args = ['/O2']
 else:
-    # Default to high-performance GCC/Clang optimization for Unix-like systems
     extra_compile_args = ['-O3']
 
+# Load README for PyPI long_description (Required for professional publishing)
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
 lqft_extension = Extension(
-    'lqft_c_engine', # This MUST match the PyInit function name in the Canvas file
+    'lqft_c_engine',
     sources=['lqft_engine.c'],
     extra_compile_args=extra_compile_args,
-    # Define this macro to handle Windows security warnings professionally
     define_macros=[('_CRT_SECURE_NO_WARNINGS', '1')]
 )
 
 setup(
-    name="lqft-python",
-    version="0.1.0",
-    description="Log-Quantum Fractal Tree: Pattern-Aware Deduplicating Data Structure with C-Engine",
+    name="lqft-python-engine",
+    version="0.1.2",
+    description="Log-Quantum Fractal Tree: Pattern-Aware Deduplicating Data Structure",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     author="Parjad Minooei",
-    author_email="parjad@example.com",
-    url="https://github.com/ParjadM/lqft-python",
+    url="https://github.com/ParjadM/Log-Quantum-Fractal-Tree-LQFT-",
     ext_modules=[lqft_extension],
     packages=find_packages(),
     py_modules=["lqft_engine"],
     install_requires=[],
+    license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.12",
+        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
+        "Topic :: Software Development :: Libraries :: Python Modules",
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.8',
 )
