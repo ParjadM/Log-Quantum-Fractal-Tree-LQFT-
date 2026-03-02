@@ -18,6 +18,9 @@ long_description = "Log-Quantum Fractal Tree Engine"
 if os.path.exists("readme.md"):
     with open("readme.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
+elif os.path.exists("README.md"):
+    with open("README.md", "r", encoding="utf-8") as fh:
+        long_description = fh.read()
 
 lqft_extension = Extension(
     'lqft_c_engine',
@@ -38,7 +41,7 @@ setup(
     packages=find_packages(),
     py_modules=["lqft_engine", "pure_python_ds"],
     install_requires=['psutil'],
-    license="MIT",
+    license="MIT", 
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.12",
