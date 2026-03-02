@@ -13,13 +13,10 @@ if os.name == 'nt':
 else:
     extra_compile_args = ['-O3']
 
-# Load README for PyPI long_description (Bulletproof File Check)
+# Load README for PyPI long_description
 long_description = "Log-Quantum Fractal Tree Engine"
 if os.path.exists("readme.md"):
     with open("readme.md", "r", encoding="utf-8") as fh:
-        long_description = fh.read()
-elif os.path.exists("README.md"):
-    with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
 
 lqft_extension = Extension(
@@ -31,7 +28,7 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.1.6", # Bumped for PyPI release
+    version="0.1.7", 
     description="Log-Quantum Fractal Tree: Pattern-Aware Deduplicating Data Structure",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -39,13 +36,12 @@ setup(
     url="https://github.com/ParjadM/Log-Quantum-Fractal-Tree-LQFT-",
     ext_modules=[lqft_extension],
     packages=find_packages(),
-    py_modules=["lqft_engine"],
+    py_modules=["lqft_engine", "pure_python_ds"],
     install_requires=['psutil'],
     license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.12",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
