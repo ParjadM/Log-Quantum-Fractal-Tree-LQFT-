@@ -13,9 +13,8 @@
 /**
  * LQFT C-Engine - V4.3 (Dynamic Registry Build)
  * Architect: Parjad Minooei
- * * CHANGE LOG:
- * - Moved Registry from Static BSS to Dynamic Heap.
- * - This allows the ~64MB pointer array to be reclaimed by the OS.
+ * * BUGFIX: Added missing 'search' method to the native export table.
+ * * MEMORY: Moved Registry to HEAP (Dynamic) for zero-footprint reclamation.
  */
 
 #define BIT_PARTITION 5
@@ -30,7 +29,7 @@ typedef struct LQFTNode {
     char struct_hash[17]; 
 } LQFTNode;
 
-// Registry is now a pointer-to-pointers on the HEAP
+// Registry is now a pointer allocated on the HEAP to allow full OS reclamation
 static LQFTNode** registry = NULL;
 static int physical_node_count = 0;
 static LQFTNode* global_root = NULL;
@@ -53,10 +52,9 @@ char* portable_strdup(const char* s) {
 #endif
 }
 
-// Memory-safe Registry Initialization
 static int init_registry() {
     if (registry == NULL) {
-        // Use calloc to ensure all pointers are initialized to NULL
+        // Use calloc to initialize all pointer slots to NULL safely
         registry = (LQFTNode**)calloc(REGISTRY_SIZE, sizeof(LQFTNode*));
         if (registry == NULL) return 0;
     }
@@ -126,7 +124,7 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
                 freed_count++;
             }
         }
-        // THE CRITICAL FIX: Free the registry array itself!
+        // Dynamic reclamation: Free the registry array itself
         free(registry);
         registry = NULL;
     }
@@ -217,12 +215,37 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+static PyObject* method_search(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+
+    if (!global_root || registry == NULL) {
+        Py_RETURN_NONE;
+    }
+
+    LQFTNode* curr = global_root;
+    int bit_depth = 0;
+
+    while (curr != NULL && curr->value == NULL) {
+        uint32_t segment = (h >> bit_depth) & MASK;
+        curr = curr->children[segment];
+        bit_depth += BIT_PARTITION;
+    }
+
+    if (curr != NULL && curr->key_hash == h) {
+        return PyUnicode_FromString((char*)curr->value);
+    }
+
+    Py_RETURN_NONE;
+}
+
 static PyObject* method_get_metrics(PyObject* self, PyObject* args) {
     return Py_BuildValue("{s:i}", "physical_nodes", physical_node_count);
 }
 
 static PyMethodDef LQFTMethods[] = {
     {"insert", method_insert, METH_VARARGS, "Insert"},
+    {"search", method_search, METH_VARARGS, "Search"},
     {"get_metrics", method_get_metrics, METH_VARARGS, "Metrics"},
     {"free_all", method_free_all, METH_VARARGS, "Reclaim"},
     {NULL, NULL, 0, NULL}
