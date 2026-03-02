@@ -27,8 +27,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.1.9", 
-    description="LQFT Engine: Full CRUD Support (v4.5 Stable)",
+    version="0.2.0", 
+    description="LQFT Engine: Full CRUD Support & Enterprise Scaling (v4.5 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",

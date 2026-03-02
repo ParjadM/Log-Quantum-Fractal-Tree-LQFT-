@@ -2,7 +2,7 @@ import hashlib
 import weakref
 
 # ---------------------------------------------------------
-# LEGACY PURE PYTHON LQFT (For reference/fallback)
+# LEGACY PURE PYTHON LQFT (For reference/fallback/benchmarks)
 # ---------------------------------------------------------
 class LQFTNode:
     __slots__ = ['children', 'value', 'key_hash', 'struct_hash', '__weakref__']
@@ -115,8 +115,8 @@ except ImportError:
 class AdaptiveLQFT:
     """
     A polymorphic, heuristic-driven data structure wrapper.
-    - Scale < 50,000: Acts as an ultra-lightweight C-Hash (Python Dict).
-    - Scale > 50,000: Automatically migrates to the Native C-Engine LQFT 
+    - Scale < threshold: Acts as an ultra-lightweight C-Hash (Python Dict).
+    - Scale > threshold: Automatically migrates to the Native C-Engine LQFT 
       for Merkle-DAG deduplication and folding.
     """
     def __init__(self, migration_threshold=50000):
@@ -140,7 +140,7 @@ class AdaptiveLQFT:
             
         for key, val in self._light_store.items():
             h = self._get_64bit_hash(key)
-            lqft_c_engine.insert(h, val)
+            lqft_c_engine.insert(h, str(val))
             
         # Clear the lightweight store to free up memory
         self._light_store.clear()
@@ -159,7 +159,7 @@ class AdaptiveLQFT:
         else:
             # Phase 2: Massive Data Operations (Native C-Heap)
             h = self._get_64bit_hash(key)
-            lqft_c_engine.insert(h, value)
+            lqft_c_engine.insert(h, str(value))
 
     def search(self, key):
         if not self.is_native:
@@ -168,9 +168,23 @@ class AdaptiveLQFT:
             h = self._get_64bit_hash(key)
             return lqft_c_engine.search(h)
 
+    def remove(self, key):
+        """Deletes a key from either the light store or the Merkle tree."""
+        if not self.is_native:
+            if key in self._light_store:
+                del self._light_store[key]
+                self.size -= 1
+        else:
+            h = self._get_64bit_hash(key)
+            lqft_c_engine.delete(h)
+
+    def delete(self, key):
+        """Alias for remove to satisfy all testing suites."""
+        self.remove(key)
+
     def clear(self):
         """
-        Memory Reclamation: Manually trigger C-level heap cleanup.
+        Memory Reclamation: Manually trigger heap cleanup.
         In the Adaptive model, this handles both the Python dict and the C-Registry.
         """
         self._light_store.clear()
@@ -179,21 +193,23 @@ class AdaptiveLQFT:
             return lqft_c_engine.free_all()
         return 0
 
+    def get_stats(self):
+        """Fetches memory metrics from the C-Engine if active."""
+        if self.is_native and C_ENGINE_READY:
+            return lqft_c_engine.get_metrics()
+        return {"physical_nodes": 0}
+
     def __del__(self):
-        """
-        Finalizer: Reclaims unmanaged C memory when the Python object is deleted.
-        Crucial for preventing memory leaks in long-running systems.
-        """
+        """Finalizer: Reclaims unmanaged C memory when the Python object is deleted."""
         try:
             self.clear()
         except:
-            # Silence errors during late interpreter shutdown/garbage collection
             pass
 
     def status(self):
         """Returns the current state of the engine."""
         return {
             "mode": "Native Merkle-DAG" if self.is_native else "Lightweight C-Hash",
-            "items": self.size,
+            "items": self.size if not self.is_native else lqft_c_engine.get_metrics().get('physical_nodes', self.size),
             "threshold": self.threshold
         }
