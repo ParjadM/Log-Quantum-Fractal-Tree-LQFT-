@@ -31,7 +31,7 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.1.3", # Bumped version for clean PyPI upload
+    version="0.1.6", # Bumped for PyPI release
     description="Log-Quantum Fractal Tree: Pattern-Aware Deduplicating Data Structure",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -40,7 +40,7 @@ setup(
     ext_modules=[lqft_extension],
     packages=find_packages(),
     py_modules=["lqft_engine"],
-    install_requires=[],
+    install_requires=['psutil'],
     license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",

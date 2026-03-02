@@ -11,30 +11,33 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine (Log-Quantum Fractal Tree) - V4.1 (Master Build)
+ * LQFT C-Engine (Log-Quantum Fractal Tree) - V4.2 (Memory Safe Master Build)
  * Architect: Parjad Minooei
- * * MAJOR FIX 1: Upgraded to 64-bit FNV-1a structural hashing (solves 32-bit collisions).
- * * MAJOR FIX 2: Added Segment Indexing `[i]` to branch hashing (solves Ghost Sibling merges).
- * * MAJOR FIX 3: Capped MAX_BITS to 64 to prevent Undefined Behavior bit-shifts.
+ * * INTEGRATED FIXES:
+ * - 64-bit FNV-1a structural hashing (solves 32-bit collisions).
+ * - Segment Indexing [i] to branch hashing (solves Ghost Sibling merges).
+ * - Capped MAX_BITS to 64 to prevent Undefined Behavior.
+ * - NEW: Global Registry Purge (free_all) for memory reclamation.
  */
 
 #define BIT_PARTITION 5
-#define MAX_BITS 64 // 64-bit integer hashes passed from Python
+#define MAX_BITS 64 
 #define MASK 0x1F 
-#define REGISTRY_SIZE 8000009 // 8 Million prime slots to guarantee massive headroom
+#define REGISTRY_SIZE 8000009 // 8 Million prime slots
 
 typedef struct LQFTNode {
     void* value;
     uint64_t key_hash;
     struct LQFTNode* children[32]; 
-    char struct_hash[17]; // 16 Hex chars + 1 Null terminator for 64-bit hash
+    char struct_hash[17]; // 16 Hex chars + 1 Null terminator
 } LQFTNode;
 
-LQFTNode* registry[REGISTRY_SIZE];
-int physical_node_count = 0;
-LQFTNode* global_root = NULL;
+// Global Registry for Interning and Memory Management
+static LQFTNode* registry[REGISTRY_SIZE];
+static int physical_node_count = 0;
+static LQFTNode* global_root = NULL;
 
-// Upgraded to 64-bit FNV-1a Hash to prevent structural collisions at massive scales
+// Upgraded to 64-bit FNV-1a Hash
 uint64_t fnv1a_64(const char* str) {
     uint64_t hash = 14695981039346656037ULL;
     while (*str) {
@@ -42,6 +45,15 @@ uint64_t fnv1a_64(const char* str) {
         hash *= 1099511628211ULL;
     }
     return hash;
+}
+
+char* portable_strdup(const char* s) {
+    if (!s) return NULL;
+#ifdef _WIN32
+    return _strdup(s);
+#else
+    return strdup(s);
+#endif
 }
 
 LQFTNode* create_node(void* value, uint64_t key_hash) {
@@ -68,16 +80,16 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
         }
     }
     
-    // 64-bit structural hash formatting
     uint64_t full_hash = fnv1a_64(buffer);
     char lookup_hash[17];
     sprintf(lookup_hash, "%016llx", (unsigned long long)full_hash);
     uint32_t idx = full_hash % REGISTRY_SIZE;
 
-    // Linear Probing logic
     uint32_t start_idx = idx;
     while (registry[idx] != NULL) {
         if (strcmp(registry[idx]->struct_hash, lookup_hash) == 0) {
+            // Found existing node; free the duplicated value string if provided
+            if (value) free(value); 
             return registry[idx];
         }
         idx = (idx + 1) % REGISTRY_SIZE;
@@ -94,13 +106,23 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     return new_node;
 }
 
-char* portable_strdup(const char* s) {
-    if (!s) return NULL;
-#ifdef _WIN32
-    return _strdup(s);
-#else
-    return strdup(s);
-#endif
+// --- MEMORY RECLAMATION ---
+
+static PyObject* method_free_all(PyObject* self, PyObject* args) {
+    int freed_count = 0;
+    for (int i = 0; i < REGISTRY_SIZE; i++) {
+        if (registry[i] != NULL) {
+            if (registry[i]->value) {
+                free(registry[i]->value);
+            }
+            free(registry[i]);
+            registry[i] = NULL;
+            freed_count++;
+        }
+    }
+    physical_node_count = 0;
+    global_root = NULL; // Reset root for next use
+    return PyLong_FromLong(freed_count);
 }
 
 // --- PYTHON API BRIDGE ---
@@ -111,6 +133,7 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "Ks", &h, &val_str)) return NULL;
 
     if (!global_root) {
+        // First run initialization
         for (int i = 0; i < REGISTRY_SIZE; i++) registry[i] = NULL;
         global_root = get_canonical(NULL, 0, NULL);
     }
@@ -137,16 +160,15 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
         bit_depth += BIT_PARTITION;
     }
 
-    // 2. Node Update / Collision Logic
+    // 2. Node Update
     LQFTNode* new_sub_node = NULL;
-
     if (curr == NULL) {
         new_sub_node = get_canonical(portable_strdup(val_str), h, NULL);
     } else if (curr->key_hash == h) {
         new_sub_node = get_canonical(portable_strdup(val_str), h, curr->children);
     } else {
         unsigned long long old_h = curr->key_hash;
-        char* old_val = (char*)curr->value;
+        char* old_val = portable_strdup((char*)curr->value);
         int temp_depth = bit_depth;
 
         while (temp_depth < MAX_BITS) {
@@ -154,7 +176,7 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
             uint32_t s_new = (h >> temp_depth) & MASK;
 
             if (s_old != s_new) {
-                LQFTNode* c_old = get_canonical(portable_strdup(old_val), old_h, curr->children);
+                LQFTNode* c_old = get_canonical(old_val, old_h, curr->children);
                 LQFTNode* c_new = get_canonical(portable_strdup(val_str), h, NULL);
 
                 LQFTNode* new_children[32] = {NULL};
@@ -164,14 +186,12 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
                 new_sub_node = get_canonical(NULL, 0, new_children);
                 break;
             } else {
-                path_nodes[path_len] = NULL; // Marker for split
+                path_nodes[path_len] = NULL; 
                 path_segs[path_len] = s_old;
                 path_len++;
                 temp_depth += BIT_PARTITION;
             }
         }
-        
-        // Absolute Hash Collision (Rare)
         if (new_sub_node == NULL) {
             new_sub_node = get_canonical(portable_strdup(val_str), h, curr->children);
         }
@@ -227,6 +247,7 @@ static PyMethodDef LQFTMethods[] = {
     {"insert", method_insert, METH_VARARGS, "Insert into C LQFT"},
     {"search", method_search, METH_VARARGS, "Search C LQFT"},
     {"get_metrics", method_get_metrics, METH_VARARGS, "Get memory metrics"},
+    {"free_all", method_free_all, METH_VARARGS, "Clear all C memory"},
     {NULL, NULL, 0, NULL}
 };
 

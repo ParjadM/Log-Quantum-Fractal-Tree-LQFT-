@@ -138,7 +138,6 @@ class AdaptiveLQFT:
             self.threshold = float('inf') # Prevent continuous upgrade attempts
             return
             
-        # print("\n[⚙️] AdaptiveLQFT: Threshold reached. Migrating to Native C-Engine...")
         for key, val in self._light_store.items():
             h = self._get_64bit_hash(key)
             lqft_c_engine.insert(h, val)
@@ -149,16 +148,16 @@ class AdaptiveLQFT:
 
     def insert(self, key, value):
         if not self.is_native:
-            # Phase 1: Small Data Operations (Lightning fast, $O(N)$ Space)
+            # Phase 1: Small Data Operations
             if key not in self._light_store:
                 self.size += 1
             self._light_store[key] = value
             
-            # Check if we need to upgrade to the big guns
+            # Check for migration threshold
             if self.size >= self.threshold:
                 self._migrate_to_native()
         else:
-            # Phase 2: Massive Data Operations ($O(Entropy)$ Space Folding)
+            # Phase 2: Massive Data Operations (Native C-Heap)
             h = self._get_64bit_hash(key)
             lqft_c_engine.insert(h, value)
 
@@ -168,6 +167,28 @@ class AdaptiveLQFT:
         else:
             h = self._get_64bit_hash(key)
             return lqft_c_engine.search(h)
+
+    def clear(self):
+        """
+        Memory Reclamation: Manually trigger C-level heap cleanup.
+        In the Adaptive model, this handles both the Python dict and the C-Registry.
+        """
+        self._light_store.clear()
+        self.size = 0
+        if C_ENGINE_READY:
+            return lqft_c_engine.free_all()
+        return 0
+
+    def __del__(self):
+        """
+        Finalizer: Reclaims unmanaged C memory when the Python object is deleted.
+        Crucial for preventing memory leaks in long-running systems.
+        """
+        try:
+            self.clear()
+        except:
+            # Silence errors during late interpreter shutdown/garbage collection
+            pass
 
     def status(self):
         """Returns the current state of the engine."""
