@@ -1,34 +1,24 @@
-# LQFT Final Production Release & Workspace Purge
+# LQFT Production Release (v0.1.8)
 # Architect: Parjad Minooei
-# Version: v0.1.7 (Zero-Footprint C-Engine Build)
+# This version promotes the V4.4 Incremental Hashing Engine to Stable.
 
-$Version = "v0.1.7"
+$Version = "v0.1.8"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
-Write-Host " 🚀 INITIATING FINAL PRODUCTION PURGE & RELEASE: $Version" -ForegroundColor Magenta
+Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
 Write-Host "==========================================================" -ForegroundColor Magenta
 
-# 1. THE TOTAL PURGE (Cleaning the workspace of all experimental artifacts)
-# This ensures your MScAC portfolio looks like a professional production repo.
-Write-Host "[*] Purging all experimental benchmarks and technical guides..." -ForegroundColor Yellow
+# 1. THE TOTAL PURGE (Cleaning experimental artifacts for a clean portfolio)
+Write-Host "[*] Purging experimental scripts and old verification suites..." -ForegroundColor Yellow
 $Extras = @(
-    # Benchmark & Verification Scripts
     "leak_test.py", "leak_verification.py", "benchmark.py", "comprehensive_benchmark.py", 
     "adaptive_benchmark.py", "trie_vs_lqft_benchmark.py", "graph_vs_lqft.py", 
     "the_architects_choice.py", "complexity_demonstrator.py", "complexity_crossover.py", 
     "leetcode_187_test.py", "memory_benchmark.py", "perplexity_benchmark_suite.py", 
     "advanced_lqft_stress_suite.py", "lqft_final_validation.py", "three_sum_lqft_test.py",
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
-    "lqft.py", "test_lqft.py",
-
-    # Documentation & Guides
-    "lqft_blog_post.md", "announcements.md", "roadmap.md", "performance_report.md", 
-    "lqft_discovery.md", "vs_setup_guide.md", "vscode_setup_guide.md", "troubleshooting_guide.md", 
-    "lqft_complexity_analysis.md", "complexity_analysis_summary.md", "lqft_algorithm_logic.md", 
-    "lqft_strategic_roadmap.md", "lqft_vs_all.md",
-    
-    # Utility Scripts
-    "github_setup.ps1"
+    "lqft.py", "test_lqft.py", "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
+    "dashboard_info.md"
 )
 
 foreach ($file in $Extras) {
@@ -39,8 +29,8 @@ foreach ($file in $Extras) {
 }
 
 # 2. LOCAL BUILD ARTIFACT CLEANUP
-Write-Host "[*] Cleaning local build folders..." -ForegroundColor Yellow
-$Artifacts = @("build", "dist", "lqft_python_engine.egg-info", "lqft_python.egg-info")
+Write-Host "[*] Cleaning build folders..." -ForegroundColor Yellow
+$Artifacts = @("build", "dist", "lqft_python_engine.egg-info")
 foreach ($folder in $Artifacts) {
     if (Test-Path $folder) {
         Remove-Item -Recurse -Force $folder
@@ -50,22 +40,21 @@ Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
 # 3. GITHUB SYNC
-Write-Host "[*] Staging production core and CI manifests..." -ForegroundColor Cyan
+Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Finalized Zero-Footprint C-Engine (Dynamic Registry)" --allow-empty
+git commit -m "release: $Version - Production Stable (Incremental Hashing Fixed)" --allow-empty
 git push origin main
 
-# 4. TAGGING (This is the critical trigger for the PyPI Release Action)
-Write-Host "[*] Updating release tag $Version..." -ForegroundColor Cyan
-# Safely remove existing tag locally and remotely to ensure v0.1.7 is fresh
+# 4. TAGGING (Triggers PyPI Action)
+Write-Host "[*] Creating production release tag $Version..." -ForegroundColor Cyan
+# Remove existing tag if it exists locally or remotely
 git tag -d $Version 2>$null
 git push origin :refs/tags/$Version 2>$null
 
-# Create and push the new production tag
+# Apply fresh tag
 git tag $Version
 git push origin --tags
 
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host " ✅ REPOSITORY IS CLEAN | DEPLOYMENT v0.1.7 LIVE" -ForegroundColor Green
-Write-Host " GitHub: https://github.com/ParjadM/Log-Quantum-Fractal-Tree-LQFT-" -ForegroundColor Cyan
+Write-Host " ✅ DEPLOYMENT $Version LIVE ON GITHUB & PYPI" -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green

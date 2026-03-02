@@ -4,12 +4,12 @@ import sys
 
 # Systems Architect Logic: Cross-Platform Compiler Detection
 extra_compile_args = []
-
 if os.name == 'nt':
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
         extra_compile_args = ['-O3']
     else:
-        extra_compile_args = ['/O2']
+        # MSVC specific optimization and security flags
+        extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
 else:
     extra_compile_args = ['-O3']
 
@@ -26,13 +26,12 @@ lqft_extension = Extension(
     'lqft_c_engine',
     sources=['lqft_engine.c'],
     extra_compile_args=extra_compile_args,
-    define_macros=[('_CRT_SECURE_NO_WARNINGS', '1')]
 )
 
 setup(
     name="lqft-python-engine",
-    version="0.1.7", 
-    description="Log-Quantum Fractal Tree: Pattern-Aware Deduplicating Data Structure",
+    version="0.1.8", 
+    description="LQFT Engine: High-Performance Deduplicating Data Structure (V4.4 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
@@ -41,7 +40,7 @@ setup(
     packages=find_packages(),
     py_modules=["lqft_engine", "pure_python_ds"],
     install_requires=['psutil'],
-    license="MIT", 
+    license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.12",
