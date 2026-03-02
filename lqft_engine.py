@@ -1,8 +1,10 @@
 import hashlib
 import weakref
+import psutil
+import os
 
 # ---------------------------------------------------------
-# LEGACY PURE PYTHON LQFT (For reference/fallback/benchmarks)
+# LEGACY PURE PYTHON LQFT (For reference/fallback)
 # ---------------------------------------------------------
 class LQFTNode:
     __slots__ = ['children', 'value', 'key_hash', 'struct_hash', '__weakref__']
@@ -39,7 +41,6 @@ class LQFTNode:
         return cls._null_cache['null']
 
 class LQFT:
-    """Legacy Pure Python Iterative Implementation."""
     def __init__(self, bit_partition=5, max_bits=256):
         self.partition = bit_partition 
         self.max_bits = max_bits 
@@ -62,7 +63,7 @@ class LQFT:
                 break
             curr = curr.children[segment]
             bit_depth += self.partition
-
+            
         new_sub_node = None
         if curr is null_node:
             new_sub_node = LQFTNode.get_canonical(value, None, h)
@@ -82,7 +83,7 @@ class LQFT:
                     temp_depth += self.partition
             if new_sub_node is None:
                 new_sub_node = LQFTNode.get_canonical(value, curr.children, h)
-
+                
         for entry in reversed(path):
             if entry[0] == "split":
                 new_sub_node = LQFTNode.get_canonical(None, {entry[1]: new_sub_node}, None)
@@ -103,8 +104,9 @@ class LQFT:
             if bit_depth >= self.max_bits: break
         return None
 
+
 # ---------------------------------------------------------
-# NEW: ADAPTIVE ENTERPRISE ENGINE (MScAC Portfolio)
+# ADAPTIVE ENTERPRISE ENGINE (v0.3.0)
 # ---------------------------------------------------------
 try:
     import lqft_c_engine
@@ -123,13 +125,32 @@ class AdaptiveLQFT:
         self.threshold = migration_threshold
         self.size = 0
         self.is_native = False
-        
-        # The "Mini Version": Python's highly optimized built-in dictionary
         self._light_store = {} 
+        
+        # --- Systems Architecture: Process Memory Limit ---
+        self.auto_purge_enabled = True
+        # Instead of global OS RAM, we set a hard cap for THIS specific process.
+        self.max_memory_mb = 1000.0 # 1 Gigabyte Limit
+        self.total_ops = 0
+        self._process = psutil.Process(os.getpid())
+
+    def _validate_type(self, key, value=None):
+        """Strict type guarding to prevent arbitrary objects from bleeding into C-Memory."""
+        if not isinstance(key, str):
+            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
 
     def _get_64bit_hash(self, key):
         """Generates a 64-bit unsigned hash for the C-Engine."""
-        return int(hashlib.md5(str(key).encode()).hexdigest()[:16], 16)
+        return int(hashlib.md5(key.encode()).hexdigest()[:16], 16)
+
+    def purge(self):
+        """Manual Purge Override to instantly free RAM."""
+        current_mb = self._process.memory_info().rss / (1024 * 1024)
+        if current_mb >= self.max_memory_mb:
+            print(f"\n[⚠️ CIRCUIT Breaker] Engine exceeded {self.max_memory_mb} MB limit (Currently {current_mb:.1f} MB). Auto-Purging!")
+        self.clear()
 
     def _migrate_to_native(self):
         """The 'Curve Flip' mechanism: moves all data to the Heavy Engine."""
@@ -140,36 +161,36 @@ class AdaptiveLQFT:
             
         for key, val in self._light_store.items():
             h = self._get_64bit_hash(key)
-            lqft_c_engine.insert(h, str(val))
+            lqft_c_engine.insert(h, val)
             
-        # Clear the lightweight store to free up memory
         self._light_store.clear()
         self.is_native = True
 
     def insert(self, key, value):
+        # 1. Type Guard (Blocks the Poison Pill test)
+        self._validate_type(key, value)
+
+        # 2. Performance Safety: Process Memory Check
+        self.total_ops += 1
+        if self.auto_purge_enabled and self.total_ops % 5000 == 0:
+            current_mb = self._process.memory_info().rss / (1024 * 1024)
+            if current_mb >= self.max_memory_mb:
+                self.purge()
+
         if not self.is_native:
-            # Phase 1: Small Data Operations
-            if key not in self._light_store:
+            if key not in self._light_store: 
                 self.size += 1
             self._light_store[key] = value
             
-            # Check for migration threshold
-            if self.size >= self.threshold:
+            if self.size >= self.threshold: 
                 self._migrate_to_native()
         else:
-            # Phase 2: Massive Data Operations (Native C-Heap)
             h = self._get_64bit_hash(key)
-            lqft_c_engine.insert(h, str(value))
-
-    def search(self, key):
-        if not self.is_native:
-            return self._light_store.get(key, None)
-        else:
-            h = self._get_64bit_hash(key)
-            return lqft_c_engine.search(h)
+            lqft_c_engine.insert(h, value)
 
     def remove(self, key):
-        """Deletes a key from either the light store or the Merkle tree."""
+        self._validate_type(key)
+        
         if not self.is_native:
             if key in self._light_store:
                 del self._light_store[key]
@@ -179,35 +200,36 @@ class AdaptiveLQFT:
             lqft_c_engine.delete(h)
 
     def delete(self, key):
-        """Alias for remove to satisfy all testing suites."""
         self.remove(key)
 
+    def search(self, key):
+        self._validate_type(key)
+        
+        if not self.is_native: 
+            return self._light_store.get(key, None)
+        else:
+            h = self._get_64bit_hash(key)
+            return lqft_c_engine.search(h)
+
     def clear(self):
-        """
-        Memory Reclamation: Manually trigger heap cleanup.
-        In the Adaptive model, this handles both the Python dict and the C-Registry.
-        """
         self._light_store.clear()
         self.size = 0
-        if C_ENGINE_READY:
+        if C_ENGINE_READY: 
             return lqft_c_engine.free_all()
         return 0
 
     def get_stats(self):
-        """Fetches memory metrics from the C-Engine if active."""
-        if self.is_native and C_ENGINE_READY:
+        if self.is_native and C_ENGINE_READY: 
             return lqft_c_engine.get_metrics()
         return {"physical_nodes": 0}
 
     def __del__(self):
-        """Finalizer: Reclaims unmanaged C memory when the Python object is deleted."""
-        try:
+        try: 
             self.clear()
-        except:
+        except: 
             pass
 
     def status(self):
-        """Returns the current state of the engine."""
         return {
             "mode": "Native Merkle-DAG" if self.is_native else "Lightweight C-Hash",
             "items": self.size if not self.is_native else lqft_c_engine.get_metrics().get('physical_nodes', self.size),

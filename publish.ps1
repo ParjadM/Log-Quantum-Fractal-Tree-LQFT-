@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.2.0)
+# LQFT Production Release (v0.3.0)
 # Architect: Parjad Minooei
-# Status: Full CRUD & Enterprise Scaling Stable
+# Status: Process Isolation, Circuit Breakers, & Type Safety Active
 
-$Version = "v0.2.0"
+$Version = "v0.3.0"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -17,7 +17,8 @@ $Extras = @(
     "leetcode_187_test.py", "memory_benchmark.py", "perplexity_benchmark_suite.py", 
     "advanced_lqft_stress_suite.py", "three_sum_lqft_test.py",
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
-    "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py"
+    "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
+    "enterprise_capability_suite.py", "pre_release_suite.py"
 )
 
 foreach ($file in $Extras) {
@@ -79,7 +80,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Stable Full CRUD & Enterprise Adaptive Logic" --allow-empty
+git commit -m "release: $Version - Memory Circuit Breaker & Strict Type Safety" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)
