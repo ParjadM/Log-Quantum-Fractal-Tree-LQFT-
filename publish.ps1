@@ -33,8 +33,10 @@ $Extras = @(
     "test_lqft.py",
     "lqft.py",
 
-    # Note: We are KEEPING test_pure_python_ds.py and pure_python_ds.py
-    # because they are required for the GitHub Actions CI/CD Pipeline.
+    # Note: We are KEEPING the following because they are required for CI/CD:
+    # - test_pure_python_ds.py
+    # - pure_python_ds.py
+    # - benchmark.py (used in main.yml validation step)
 
     # Documentation & Guides (Kept in Canvas, removed from Repo for 'Clean' look)
     "lqft_blog_post.md",
