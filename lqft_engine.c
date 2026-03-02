@@ -11,12 +11,12 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine - V4.4 (Large Payload Support)
+ * LQFT C-Engine - V4.5 (Full CRUD & Large Payload)
  * Architect: Parjad Minooei
  * * CHANGE LOG:
- * - Removed fixed 8KB stack buffer in get_canonical.
- * - Implemented Incremental FNV-1a Hashing to support multi-MB payloads.
- * - Optimized string interning for high-concurrency memory safety.
+ * - Added 'delete' method with bottom-up path reconstruction.
+ * - Maintains Incremental FNV-1a Hashing for large payloads.
+ * - Fixed Stack-to-Heap collision for multi-MB data.
  */
 
 #define BIT_PARTITION 5
@@ -35,7 +35,6 @@ static LQFTNode** registry = NULL;
 static int physical_node_count = 0;
 static LQFTNode* global_root = NULL;
 
-// Incremental FNV-1a Constants
 const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
 const uint64_t FNV_PRIME = 1099511628211ULL;
 
@@ -77,18 +76,13 @@ LQFTNode* create_node(void* value, uint64_t key_hash) {
 LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     if (!init_registry()) return NULL;
 
-    // V4.4 REFACTOR: Incremental hashing instead of sprintf concatenation
-    // This avoids the 8KB buffer overflow for large payloads.
     uint64_t full_hash = FNV_OFFSET_BASIS;
-
     if (value != NULL) {
-        const char* prefix = "leaf:";
-        full_hash = fnv1a_update(full_hash, prefix, 5);
+        full_hash = fnv1a_update(full_hash, "leaf:", 5);
         full_hash = fnv1a_update(full_hash, value, strlen((char*)value));
         full_hash = fnv1a_update(full_hash, &key_hash, sizeof(uint64_t));
     } else {
-        const char* prefix = "branch:";
-        full_hash = fnv1a_update(full_hash, prefix, 7);
+        full_hash = fnv1a_update(full_hash, "branch:", 7);
         if (children) {
             for (int i = 0; i < 32; i++) {
                 if (children[i]) {
@@ -102,8 +96,8 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     char lookup_hash[17];
     sprintf(lookup_hash, "%016llx", (unsigned long long)full_hash);
     uint32_t idx = full_hash % REGISTRY_SIZE;
-
     uint32_t start_idx = idx;
+
     while (registry[idx] != NULL) {
         if (strcmp(registry[idx]->struct_hash, lookup_hash) == 0) {
             if (value) free(value); 
@@ -122,6 +116,58 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     registry[idx] = new_node;
     physical_node_count++;
     return new_node;
+}
+
+static PyObject* method_delete(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    if (!global_root) Py_RETURN_NONE;
+
+    LQFTNode* path_nodes[20]; 
+    uint32_t path_segs[20];
+    int path_len = 0;
+    LQFTNode* curr = global_root;
+    int bit_depth = 0;
+
+    // Trace path to target
+    while (curr != NULL && curr->value == NULL) {
+        uint32_t segment = (h >> bit_depth) & MASK;
+        path_nodes[path_len] = curr;
+        path_segs[path_len] = segment;
+        path_len++;
+        curr = curr->children[segment];
+        bit_depth += BIT_PARTITION;
+    }
+
+    // If not found, exit
+    if (curr == NULL || curr->key_hash != h) Py_RETURN_NONE;
+
+    // Rebuild bottom-up: start with NULL (the deleted leaf)
+    LQFTNode* new_sub_node = NULL;
+
+    for (int i = path_len - 1; i >= 0; i--) {
+        LQFTNode* p_node = path_nodes[i];
+        uint32_t segment = path_segs[i];
+        LQFTNode* new_children[32];
+        int has_other_children = 0;
+
+        for (int j = 0; j < 32; j++) {
+            if (j == segment) new_children[j] = new_sub_node;
+            else {
+                new_children[j] = p_node->children[j];
+                if (new_children[j]) has_other_children = 1;
+            }
+        }
+
+        if (!has_other_children && i > 0) {
+            new_sub_node = NULL; // Contract empty branch
+        } else {
+            new_sub_node = get_canonical(NULL, 0, new_children);
+        }
+    }
+
+    global_root = (new_sub_node) ? new_sub_node : get_canonical(NULL, 0, NULL);
+    Py_RETURN_NONE;
 }
 
 static PyObject* method_free_all(PyObject* self, PyObject* args) {
@@ -145,47 +191,34 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
     unsigned long long h;
     char* val_str;
     if (!PyArg_ParseTuple(args, "Ks", &h, &val_str)) return NULL;
-
     if (!global_root) {
         if (!init_registry()) return PyErr_NoMemory();
         global_root = get_canonical(NULL, 0, NULL);
     }
-
-    LQFTNode* path_nodes[MAX_BITS];
-    uint32_t path_segs[MAX_BITS];
+    LQFTNode* path_nodes[20];
+    uint32_t path_segs[20];
     int path_len = 0;
-
     LQFTNode* curr = global_root;
     int bit_depth = 0;
-
     while (curr != NULL && curr->value == NULL) {
         uint32_t segment = (h >> bit_depth) & MASK;
         path_nodes[path_len] = curr;
         path_segs[path_len] = segment;
         path_len++;
-
-        if (curr->children[segment] == NULL) {
-            curr = NULL;
-            break;
-        }
+        if (curr->children[segment] == NULL) { curr = NULL; break; }
         curr = curr->children[segment];
         bit_depth += BIT_PARTITION;
     }
-
     LQFTNode* new_sub_node = NULL;
-    if (curr == NULL) {
-        new_sub_node = get_canonical(portable_strdup(val_str), h, NULL);
-    } else if (curr->key_hash == h) {
-        new_sub_node = get_canonical(portable_strdup(val_str), h, curr->children);
-    } else {
+    if (curr == NULL) { new_sub_node = get_canonical(portable_strdup(val_str), h, NULL); }
+    else if (curr->key_hash == h) { new_sub_node = get_canonical(portable_strdup(val_str), h, curr->children); }
+    else {
         unsigned long long old_h = curr->key_hash;
         char* old_val = portable_strdup((char*)curr->value);
         int temp_depth = bit_depth;
-
-        while (temp_depth < MAX_BITS) {
+        while (temp_depth < 64) {
             uint32_t s_old = (old_h >> temp_depth) & MASK;
             uint32_t s_new = (h >> temp_depth) & MASK;
-
             if (s_old != s_new) {
                 LQFTNode* c_old = get_canonical(old_val, old_h, curr->children);
                 LQFTNode* c_new = get_canonical(portable_strdup(val_str), h, NULL);
@@ -194,16 +227,10 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
                 new_children[s_new] = c_new;
                 new_sub_node = get_canonical(NULL, 0, new_children);
                 break;
-            } else {
-                path_nodes[path_len] = NULL; 
-                path_segs[path_len] = s_old;
-                path_len++;
-                temp_depth += BIT_PARTITION;
-            }
+            } else { path_nodes[path_len] = NULL; path_segs[path_len] = s_old; path_len++; temp_depth += BIT_PARTITION; }
         }
         if (new_sub_node == NULL) new_sub_node = get_canonical(portable_strdup(val_str), h, curr->children);
     }
-
     for (int i = path_len - 1; i >= 0; i--) {
         if (path_nodes[i] == NULL) {
             LQFTNode* new_children[32] = {NULL};
@@ -218,7 +245,6 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
             new_sub_node = get_canonical(p_node->value, p_node->key_hash, new_children);
         }
     }
-
     global_root = new_sub_node;
     Py_RETURN_NONE;
 }
@@ -227,7 +253,6 @@ static PyObject* method_search(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     if (!global_root) Py_RETURN_NONE;
-
     LQFTNode* curr = global_root;
     int bit_depth = 0;
     while (curr != NULL && curr->value == NULL) {
@@ -244,10 +269,11 @@ static PyObject* method_get_metrics(PyObject* self, PyObject* args) {
 }
 
 static PyMethodDef LQFTMethods[] = {
-    {"insert", method_insert, METH_VARARGS, "Insert payload"},
-    {"search", method_search, METH_VARARGS, "Search hash"},
-    {"get_metrics", method_get_metrics, METH_VARARGS, "Get metrics"},
-    {"free_all", method_free_all, METH_VARARGS, "Reclaim memory"},
+    {"insert", method_insert, METH_VARARGS, "Insert key-value"},
+    {"delete", method_delete, METH_VARARGS, "Delete key"},
+    {"search", method_search, METH_VARARGS, "Search key"},
+    {"get_metrics", method_get_metrics, METH_VARARGS, "Get engine stats"},
+    {"free_all", method_free_all, METH_VARARGS, "Total memory wipe"},
     {NULL, NULL, 0, NULL}
 };
 

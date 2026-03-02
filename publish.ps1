@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.1.8)
+# LQFT Production Release (v0.1.9)
 # Architect: Parjad Minooei
-# This version promotes the V4.4 Incremental Hashing Engine to Stable.
+# This version adds the 'remove' method for full CRUD capability and bottom-up reconstruction.
 
-$Version = "v0.1.8"
+$Version = "v0.1.9"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -17,7 +17,7 @@ $Extras = @(
     "leetcode_187_test.py", "memory_benchmark.py", "perplexity_benchmark_suite.py", 
     "advanced_lqft_stress_suite.py", "lqft_final_validation.py", "three_sum_lqft_test.py",
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
-    "lqft.py", "test_lqft.py", "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
+    "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py", "validation.py",
     "dashboard_info.md"
 )
 
@@ -42,16 +42,13 @@ Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 # 3. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Production Stable (Incremental Hashing Fixed)" --allow-empty
+git commit -m "release: $Version - Full CRUD Support (Added Remove Method & Path Reconstruction)" --allow-empty
 git push origin main
 
 # 4. TAGGING (Triggers PyPI Action)
 Write-Host "[*] Creating production release tag $Version..." -ForegroundColor Cyan
-# Remove existing tag if it exists locally or remotely
 git tag -d $Version 2>$null
 git push origin :refs/tags/$Version 2>$null
-
-# Apply fresh tag
 git tag $Version
 git push origin --tags
 

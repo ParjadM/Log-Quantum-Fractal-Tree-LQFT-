@@ -15,10 +15,7 @@ else:
 
 # Load README for PyPI long_description
 long_description = "Log-Quantum Fractal Tree Engine"
-if os.path.exists("readme.md"):
-    with open("readme.md", "r", encoding="utf-8") as fh:
-        long_description = fh.read()
-elif os.path.exists("README.md"):
+if os.path.exists("README.md"):
     with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
 
@@ -30,8 +27,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.1.8", 
-    description="LQFT Engine: High-Performance Deduplicating Data Structure (V4.4 Stable)",
+    version="0.1.9", 
+    description="LQFT Engine: Full CRUD Support (v4.5 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
