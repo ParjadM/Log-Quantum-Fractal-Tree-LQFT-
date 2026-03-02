@@ -1,21 +1,7 @@
-Core Build System (PEP 517/518)
-
 setuptools>=61.0
 wheel
 build>=1.0.3
-
-Testing & Code Coverage Validation
-
 pytest>=7.0
 pytest-cov>=4.1.0
-
-CI/CD Quality Gates (Linting & Formatting)
-
 black>=23.0
 flake8>=6.0
-
-Systems Profiling (Documentation Only)
-
-Note: 'tracemalloc', 'hashlib', and 'sys' are utilized heavily in
-
-the benchmark suite but are native to the Python Standard Library.
