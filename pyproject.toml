@@ -16,8 +16,7 @@ CFLAGS="-O3 -Wall"
 [tool.cibuildwheel.linux]
 # Manylinux is the industry standard for portable Linux binaries
 archs = ["x86_64"]
-# Ensure GCC is available in the build container
-before-build = "yum install -y gcc"
+# (Removed 'yum install gcc' - Manylinux containers have it pre-installed natively)
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
