@@ -27,15 +27,15 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.5.0", 
-    description="LQFT Engine: Native Disk Persistence & Cold Start Deserialization (v5.0 Stable)",
+    version="0.7.0", 
+    description="LQFT Engine: Strict Native C-Core & Hardware Concurrency (v0.7.0 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
     url="https://github.com/ParjadM/Log-Quantum-Fractal-Tree-LQFT-",
     ext_modules=[lqft_extension],
     packages=find_packages(),
-    py_modules=["lqft_engine", "pure_python_ds"],
+    py_modules=["lqft_engine"], 
     install_requires=['psutil'],
     license="MIT",
     classifiers=[
