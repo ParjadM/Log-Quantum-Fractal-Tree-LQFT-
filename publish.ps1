@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.7.0)
+# LQFT Production Release (v0.7.5)
 # Architect: Parjad Minooei
-# Status: Phase 3 (Strict Native C-Core Enforcement) Complete
+# Status: Phase 3 (Strict Native C-Core Enforcement & Strict GIL Bypass)
 
-$Version = "v0.7.0"
+$Version = "v0.7.5"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -88,7 +88,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Strict Native C-Engine Enforcement" --allow-empty
+git commit -m "release: $Version - Strict Native C-Engine Enforcement & Strict GIL Bypass" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)

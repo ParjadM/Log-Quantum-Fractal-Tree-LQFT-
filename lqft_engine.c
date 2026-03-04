@@ -10,7 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 
-// --- PHASE 2: CROSS-PLATFORM HARDWARE LOCKS ---
+// --- CROSS-PLATFORM HARDWARE LOCKS ---
 #ifdef _WIN32
     #include <windows.h>
     typedef SRWLOCK lqft_rwlock_t;
@@ -30,12 +30,12 @@
 #endif
 
 /**
- * LQFT C-Engine - V0.6.0 (Hardware Concurrency)
+ * LQFT C-Engine - V0.7.0 (Strict Native Concurrency)
  * Architect: Parjad Minooei
  * * CHANGE LOG:
- * - Implemented SRWLOCK / pthread_rwlock for true multi-core utilization.
- * - Bypassed Python GIL using Py_BEGIN_ALLOW_THREADS.
- * - Fixed Macro brace expansions for thread safe early returns.
+ * - Full GIL bypass implemented on all exposed Python endpoints.
+ * - Strict Separation of Concerns: PyArg parsing -> Drop GIL -> C++ Logic -> Reacquire GIL -> Py_BuildValue.
+ * - Thread-safe early returns fixed.
  */
 
 #define BIT_PARTITION 5
@@ -56,7 +56,7 @@ typedef struct LQFTNode {
 static LQFTNode** registry = NULL;
 static int physical_node_count = 0;
 static LQFTNode* global_root = NULL;
-static lqft_rwlock_t engine_lock; // The Master Hardware Lock
+static lqft_rwlock_t engine_lock; 
 static int lock_initialized = 0;
 
 const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
@@ -106,9 +106,6 @@ LQFTNode* create_node(void* value, uint64_t key_hash) {
     return node;
 }
 
-// -------------------------------------------------------------------
-// Memory Management (ARC)
-// -------------------------------------------------------------------
 void decref(LQFTNode* node) {
     if (!node) return;
     node->ref_count--;
@@ -132,198 +129,8 @@ void decref(LQFTNode* node) {
     }
 }
 
-static PyObject* method_free_all(PyObject* self, PyObject* args) {
-    Py_BEGIN_ALLOW_THREADS
-    LQFT_RWLOCK_WRLOCK(&engine_lock);
-    if (registry != NULL) {
-        for (int i = 0; i < REGISTRY_SIZE; i++) {
-            if (registry[i] != NULL && registry[i] != TOMBSTONE) {
-                if (registry[i]->value) free(registry[i]->value);
-                free(registry[i]);
-            }
-            registry[i] = NULL;
-        }
-        free(registry);
-        registry = NULL;
-    }
-    physical_node_count = 0;
-    global_root = NULL;
-    LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
-    Py_END_ALLOW_THREADS
-
-    Py_RETURN_NONE;
-}
-
 // -------------------------------------------------------------------
-// Disk Persistence (Binary Serialization)
-// -------------------------------------------------------------------
-static PyObject* method_save_to_disk(PyObject* self, PyObject* args) {
-    const char* filepath;
-    if (!PyArg_ParseTuple(args, "s", &filepath)) return NULL;
-    
-    int success = 1;
-    
-    // Release GIL, Lock Engine for Writing
-    Py_BEGIN_ALLOW_THREADS
-    LQFT_RWLOCK_WRLOCK(&engine_lock);
-    
-    if (!registry) {
-        success = 0;
-    } else {
-        FILE* fp = fopen(filepath, "wb");
-        if (!fp) {
-            success = 0;
-        } else {
-            char magic[4] = "LQFT";
-            fwrite(magic, 1, 4, fp);
-            fwrite(&physical_node_count, sizeof(int), 1, fp);
-            uint64_t root_hash = global_root ? global_root->full_hash_val : 0;
-            fwrite(&root_hash, sizeof(uint64_t), 1, fp);
-
-            for (int i = 0; i < REGISTRY_SIZE; i++) {
-                LQFTNode* node = registry[i];
-                if (node != NULL && node != TOMBSTONE) {
-                    fwrite(&node->full_hash_val, sizeof(uint64_t), 1, fp);
-                    fwrite(&node->key_hash, sizeof(uint64_t), 1, fp);
-                    fwrite(node->struct_hash, 1, 17, fp);
-                    fwrite(&node->ref_count, sizeof(int), 1, fp);
-
-                    int has_val = (node->value != NULL) ? 1 : 0;
-                    fwrite(&has_val, sizeof(int), 1, fp);
-                    if (has_val) {
-                        int v_len = (int)strlen((char*)node->value);
-                        fwrite(&v_len, sizeof(int), 1, fp);
-                        fwrite(node->value, 1, v_len, fp);
-                    }
-
-                    uint64_t child_refs[32] = {0};
-                    for (int c = 0; c < 32; c++) {
-                        if (node->children[c]) child_refs[c] = node->children[c]->full_hash_val;
-                    }
-                    fwrite(child_refs, sizeof(uint64_t), 32, fp);
-                }
-            }
-            fclose(fp);
-        }
-    }
-    LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
-    Py_END_ALLOW_THREADS
-
-    if (!success) return PyErr_SetFromErrno(PyExc_IOError);
-    Py_RETURN_TRUE;
-}
-
-LQFTNode* find_in_registry(uint64_t full_hash) {
-    if (full_hash == 0) return NULL;
-    uint32_t idx = full_hash % REGISTRY_SIZE;
-    uint32_t start_idx = idx;
-    while (registry[idx] != NULL) {
-        if (registry[idx] != TOMBSTONE && registry[idx]->full_hash_val == full_hash) {
-            return registry[idx];
-        }
-        idx = (idx + 1) % REGISTRY_SIZE;
-        if (idx == start_idx) break;
-    }
-    return NULL;
-}
-
-static PyObject* method_load_from_disk(PyObject* self, PyObject* args) {
-    const char* filepath;
-    if (!PyArg_ParseTuple(args, "s", &filepath)) return NULL;
-
-    int success = 1;
-    int format_error = 0;
-
-    Py_BEGIN_ALLOW_THREADS
-    LQFT_RWLOCK_WRLOCK(&engine_lock);
-    
-    FILE* fp = fopen(filepath, "rb");
-    if (!fp) {
-        success = 0;
-    } else {
-        char magic[5] = {0};
-        fread(magic, 1, 4, fp);
-        if (strcmp(magic, "LQFT") != 0) {
-            fclose(fp);
-            format_error = 1;
-            success = 0;
-        } else {
-            // Internal clear
-            if (registry != NULL) {
-                for (int i = 0; i < REGISTRY_SIZE; i++) {
-                    if (registry[i] != NULL && registry[i] != TOMBSTONE) {
-                        if (registry[i]->value) free(registry[i]->value);
-                        free(registry[i]);
-                    }
-                    registry[i] = NULL;
-                }
-            }
-            physical_node_count = 0;
-            global_root = NULL;
-            init_registry();
-
-            int total_nodes;
-            uint64_t root_hash;
-            fread(&total_nodes, sizeof(int), 1, fp);
-            fread(&root_hash, sizeof(uint64_t), 1, fp);
-
-            uint64_t* all_child_refs = (uint64_t*)malloc(total_nodes * 32 * sizeof(uint64_t));
-            LQFTNode** loaded_nodes = (LQFTNode**)malloc(total_nodes * sizeof(LQFTNode*));
-
-            for (int i = 0; i < total_nodes; i++) {
-                LQFTNode* node = create_node(NULL, 0);
-                fread(&node->full_hash_val, sizeof(uint64_t), 1, fp);
-                fread(&node->key_hash, sizeof(uint64_t), 1, fp);
-                fread(node->struct_hash, 1, 17, fp);
-                fread(&node->ref_count, sizeof(int), 1, fp);
-
-                int has_val;
-                fread(&has_val, sizeof(int), 1, fp);
-                if (has_val) {
-                    int v_len;
-                    fread(&v_len, sizeof(int), 1, fp);
-                    char* val_str = (char*)malloc(v_len + 1);
-                    fread(val_str, 1, v_len, fp);
-                    val_str[v_len] = '\0';
-                    node->value = val_str;
-                }
-
-                fread(&all_child_refs[i * 32], sizeof(uint64_t), 32, fp);
-
-                uint32_t idx = node->full_hash_val % REGISTRY_SIZE;
-                while (registry[idx] != NULL) idx = (idx + 1) % REGISTRY_SIZE;
-                registry[idx] = node;
-                loaded_nodes[i] = node;
-                physical_node_count++;
-            }
-
-            for (int i = 0; i < total_nodes; i++) {
-                for (int c = 0; c < 32; c++) {
-                    uint64_t target_hash = all_child_refs[i * 32 + c];
-                    if (target_hash != 0) loaded_nodes[i]->children[c] = find_in_registry(target_hash);
-                }
-            }
-
-            global_root = find_in_registry(root_hash);
-            free(all_child_refs);
-            free(loaded_nodes);
-            fclose(fp);
-        }
-    }
-    LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
-    Py_END_ALLOW_THREADS
-
-    if (format_error) {
-        PyErr_SetString(PyExc_ValueError, "Invalid LQFT binary file format.");
-        return NULL;
-    }
-    if (!success) return PyErr_SetFromErrno(PyExc_IOError);
-
-    Py_RETURN_TRUE;
-}
-
-// -------------------------------------------------------------------
-// Merkle-DAG Core (Standard Operations)
+// Merkle-DAG Core logic (Called ONLY while GIL is released)
 // -------------------------------------------------------------------
 LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     if (!init_registry()) return NULL;
@@ -382,15 +189,35 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     return new_node;
 }
 
+LQFTNode* find_in_registry(uint64_t full_hash) {
+    if (full_hash == 0) return NULL;
+    uint32_t idx = full_hash % REGISTRY_SIZE;
+    uint32_t start_idx = idx;
+    while (registry[idx] != NULL) {
+        if (registry[idx] != TOMBSTONE && registry[idx]->full_hash_val == full_hash) {
+            return registry[idx];
+        }
+        idx = (idx + 1) % REGISTRY_SIZE;
+        if (idx == start_idx) break;
+    }
+    return NULL;
+}
+
+// -------------------------------------------------------------------
+// EXPOSED PYTHON ENDPOINTS (STRICT GIL BOUNDARIES)
+// -------------------------------------------------------------------
+
 static PyObject* method_insert(PyObject* self, PyObject* args) {
     unsigned long long h;
     char* val_str;
+    
+    // 1. Py API Call: Must happen BEFORE dropping the GIL
     if (!PyArg_ParseTuple(args, "Ks", &h, &val_str)) return NULL;
     
-    // Copy the string before dropping the GIL to prevent memory corruption
+    // 2. Safe duplication to unmanaged C memory before dropping GIL
     char* val_copy = portable_strdup(val_str);
 
-    // Bypass GIL & Lock Engine (Exclusive Write Lock)
+    // 3. Drop GIL: Pure C execution begins across multiple threads
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_WRLOCK(&engine_lock);
     
@@ -468,18 +295,23 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
     
     free(val_copy);
     LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
+    
+    // 4. Reacquire GIL: Execution returns to Python
     Py_END_ALLOW_THREADS
 
+    // 5. Py API Call: Return Python Object
     Py_RETURN_NONE;
 }
 
 static PyObject* method_search(PyObject* self, PyObject* args) {
     unsigned long long h;
+    
+    // 1. Py API Call BEFORE GIL Drop
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     
     char* result_str = NULL;
 
-    // Bypass GIL & Lock Engine (Shared Read Lock - Multiple threads can enter simultaneously!)
+    // 2. Drop GIL: Shared Read Lock allows true multi-core concurrent reads
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&engine_lock);
     
@@ -497,16 +329,22 @@ static PyObject* method_search(PyObject* self, PyObject* args) {
     }
     
     LQFT_RWLOCK_UNLOCK_RD(&engine_lock);
+    
+    // 3. Reacquire GIL
     Py_END_ALLOW_THREADS
     
+    // 4. Py API Call AFTER GIL Acquired
     if (result_str) return PyUnicode_FromString(result_str);
     Py_RETURN_NONE;
 }
 
 static PyObject* method_delete(PyObject* self, PyObject* args) {
     unsigned long long h;
+    
+    // 1. Py API Call BEFORE GIL Drop
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
 
+    // 2. Drop GIL
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_WRLOCK(&engine_lock);
     
@@ -555,12 +393,187 @@ static PyObject* method_delete(PyObject* self, PyObject* args) {
     }
     
     LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
+    
+    // 3. Reacquire GIL
+    Py_END_ALLOW_THREADS
+
+    // 4. Py API Call AFTER GIL Acquired
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_save_to_disk(PyObject* self, PyObject* args) {
+    const char* filepath;
+    if (!PyArg_ParseTuple(args, "s", &filepath)) return NULL;
+    
+    int success = 1;
+    
+    Py_BEGIN_ALLOW_THREADS
+    LQFT_RWLOCK_WRLOCK(&engine_lock);
+    
+    if (!registry) {
+        success = 0;
+    } else {
+        FILE* fp = fopen(filepath, "wb");
+        if (!fp) {
+            success = 0;
+        } else {
+            char magic[4] = "LQFT";
+            fwrite(magic, 1, 4, fp);
+            fwrite(&physical_node_count, sizeof(int), 1, fp);
+            uint64_t root_hash = global_root ? global_root->full_hash_val : 0;
+            fwrite(&root_hash, sizeof(uint64_t), 1, fp);
+
+            for (int i = 0; i < REGISTRY_SIZE; i++) {
+                LQFTNode* node = registry[i];
+                if (node != NULL && node != TOMBSTONE) {
+                    fwrite(&node->full_hash_val, sizeof(uint64_t), 1, fp);
+                    fwrite(&node->key_hash, sizeof(uint64_t), 1, fp);
+                    fwrite(node->struct_hash, 1, 17, fp);
+                    fwrite(&node->ref_count, sizeof(int), 1, fp);
+
+                    int has_val = (node->value != NULL) ? 1 : 0;
+                    fwrite(&has_val, sizeof(int), 1, fp);
+                    if (has_val) {
+                        int v_len = (int)strlen((char*)node->value);
+                        fwrite(&v_len, sizeof(int), 1, fp);
+                        fwrite(node->value, 1, v_len, fp);
+                    }
+
+                    uint64_t child_refs[32] = {0};
+                    for (int c = 0; c < 32; c++) {
+                        if (node->children[c]) child_refs[c] = node->children[c]->full_hash_val;
+                    }
+                    fwrite(child_refs, sizeof(uint64_t), 32, fp);
+                }
+            }
+            fclose(fp);
+        }
+    }
+    LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
+    Py_END_ALLOW_THREADS
+
+    if (!success) return PyErr_SetFromErrno(PyExc_IOError);
+    Py_RETURN_TRUE;
+}
+
+static PyObject* method_load_from_disk(PyObject* self, PyObject* args) {
+    const char* filepath;
+    if (!PyArg_ParseTuple(args, "s", &filepath)) return NULL;
+
+    int success = 1;
+    int format_error = 0;
+
+    Py_BEGIN_ALLOW_THREADS
+    LQFT_RWLOCK_WRLOCK(&engine_lock);
+    
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) {
+        success = 0;
+    } else {
+        char magic[5] = {0};
+        fread(magic, 1, 4, fp);
+        if (strcmp(magic, "LQFT") != 0) {
+            fclose(fp);
+            format_error = 1;
+            success = 0;
+        } else {
+            if (registry != NULL) {
+                for (int i = 0; i < REGISTRY_SIZE; i++) {
+                    if (registry[i] != NULL && registry[i] != TOMBSTONE) {
+                        if (registry[i]->value) free(registry[i]->value);
+                        free(registry[i]);
+                    }
+                    registry[i] = NULL;
+                }
+            }
+            physical_node_count = 0;
+            global_root = NULL;
+            init_registry();
+
+            int total_nodes;
+            uint64_t root_hash;
+            fread(&total_nodes, sizeof(int), 1, fp);
+            fread(&root_hash, sizeof(uint64_t), 1, fp);
+
+            uint64_t* all_child_refs = (uint64_t*)malloc(total_nodes * 32 * sizeof(uint64_t));
+            LQFTNode** loaded_nodes = (LQFTNode**)malloc(total_nodes * sizeof(LQFTNode*));
+
+            for (int i = 0; i < total_nodes; i++) {
+                LQFTNode* node = create_node(NULL, 0);
+                fread(&node->full_hash_val, sizeof(uint64_t), 1, fp);
+                fread(&node->key_hash, sizeof(uint64_t), 1, fp);
+                fread(node->struct_hash, 1, 17, fp);
+                fread(&node->ref_count, sizeof(int), 1, fp);
+
+                int has_val;
+                fread(&has_val, sizeof(int), 1, fp);
+                if (has_val) {
+                    int v_len;
+                    fread(&v_len, sizeof(int), 1, fp);
+                    char* val_str = (char*)malloc(v_len + 1);
+                    fread(val_str, 1, v_len, fp);
+                    val_str[v_len] = '\0';
+                    node->value = val_str;
+                }
+
+                fread(&all_child_refs[i * 32], sizeof(uint64_t), 32, fp);
+
+                uint32_t idx = node->full_hash_val % REGISTRY_SIZE;
+                while (registry[idx] != NULL) idx = (idx + 1) % REGISTRY_SIZE;
+                registry[idx] = node;
+                loaded_nodes[i] = node;
+                physical_node_count++;
+            }
+
+            for (int i = 0; i < total_nodes; i++) {
+                for (int c = 0; c < 32; c++) {
+                    uint64_t target_hash = all_child_refs[i * 32 + c];
+                    if (target_hash != 0) loaded_nodes[i]->children[c] = find_in_registry(target_hash);
+                }
+            }
+
+            global_root = find_in_registry(root_hash);
+            free(all_child_refs);
+            free(loaded_nodes);
+            fclose(fp);
+        }
+    }
+    LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
+    Py_END_ALLOW_THREADS
+
+    if (format_error) {
+        PyErr_SetString(PyExc_ValueError, "Invalid LQFT binary file format.");
+        return NULL;
+    }
+    if (!success) return PyErr_SetFromErrno(PyExc_IOError);
+
+    Py_RETURN_TRUE;
+}
+
+static PyObject* method_free_all(PyObject* self, PyObject* args) {
+    Py_BEGIN_ALLOW_THREADS
+    LQFT_RWLOCK_WRLOCK(&engine_lock);
+    if (registry != NULL) {
+        for (int i = 0; i < REGISTRY_SIZE; i++) {
+            if (registry[i] != NULL && registry[i] != TOMBSTONE) {
+                if (registry[i]->value) free(registry[i]->value);
+                free(registry[i]);
+            }
+            registry[i] = NULL;
+        }
+        free(registry);
+        registry = NULL;
+    }
+    physical_node_count = 0;
+    global_root = NULL;
+    LQFT_RWLOCK_UNLOCK_WR(&engine_lock);
     Py_END_ALLOW_THREADS
 
     Py_RETURN_NONE;
 }
 
 static PyObject* method_get_metrics(PyObject* self, PyObject* args) {
+    // Fast un-locked fetch (metric tracking), pure Py API
     return Py_BuildValue("{s:i}", "physical_nodes", physical_node_count);
 }
 

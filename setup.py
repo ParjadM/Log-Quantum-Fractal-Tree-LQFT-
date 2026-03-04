@@ -27,8 +27,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.7.0", 
-    description="LQFT Engine: Strict Native C-Core & Hardware Concurrency (v0.7.0 Stable)",
+    version="0.7.5", 
+    description="LQFT Engine: Strict Native C-Core & Hardware Concurrency (v0.7.5 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",

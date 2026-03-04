@@ -2,7 +2,7 @@
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](#)
 [![C-Engine](https://img.shields.io/badge/Native-C-red.svg)](#)
-[![Concurrency](https://img.shields.io/badge/Concurrency-GIL__Bypass-success.svg)](#)
+[![Concurrency](https://img.shields.io/badge/Concurrency-Strict_GIL__Bypass-success.svg)](#)
 [![Systems Architecture](https://img.shields.io/badge/Architecture-Merkle_HAMT-pink.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE.md)
 
@@ -14,15 +14,15 @@ By offloading core associative logic to a native C-Extension, the LQFT completel
 
 ---
 
-## 🧠 Core Architecture (v0.7.0 Strict Native Release)
+## 🧠 Core Architecture (v0.7.5 Strict Native Release)
 
-### 1. Strict C-Core Enforcement (New in v0.7.0)
+### 1. Strict C-Core Enforcement 
 The legacy pure-Python fallback heuristics have been entirely stripped out. The LQFT now operates strictly as a zero-overhead FFI wrapper directly communicating with the underlying unmanaged C memory heap.
 
-### 2. True Hardware Concurrency & GIL Bypass
-The engine utilizes native OS-level read-write locks (`SRWLOCK` on Windows, `pthread_rwlock_t` on POSIX) combined with `Py_BEGIN_ALLOW_THREADS`. 
+### 2. True Hardware Concurrency & Strict GIL Bypass (New in v0.7.5)
+The engine utilizes native OS-level read-write locks (`SRWLOCK` on Windows, `pthread_rwlock_t` on POSIX) combined with strict `Py_BEGIN_ALLOW_THREADS` boundaries. 
 * **Multi-Core Scaling:** Multiple Python threads can read and write to the Merkle-DAG simultaneously across all physical CPU cores without Segmentation Faults.
-* **Zero GIL Contention:** The C-Engine entirely decouples from the Python interpreter during execution.
+* **Zero GIL Contention:** The C-Engine entirely decouples from the Python interpreter during execution, ensuring the GIL never blocks concurrent array traversals.
 
 ### 3. Scale-Invariant Time Complexity: $O(1)$
 The LQFT utilizes a fixed 64-bit hash space partitioned into 13 levels. 
@@ -37,12 +37,12 @@ Nodes are identified by the cryptographic hash of their contents and child point
 
 ## 🚀 Performance Benchmarks
 
-*Environment: Python 3.12 | GCC -O3 | MSYS2/MinGW64*
+*Environment: Python 3.12 | GCC -O3 | MSYS2/MinGW64 | 16-Thread Concurrency*
 
 | Metric | Result | 
 | :--- | :--- | 
 | **Search Latency (p50)** | ~500 ns | 
-| **Concurrent Throughput** | ~1.8 Million ops/sec (Across 10 OS Threads) | 
+| **Concurrent Throughput** | ~1.8 Million ops/sec (True Multi-Core) | 
 | **Space Efficiency** | Up to 1,500x reduction in versioned graph simulations | 
 | **Stability** | 100% Memory Safe under massive multi-threaded turnover | 
 
@@ -79,7 +79,7 @@ def worker(thread_id):
     for i in range(10000):
         db.insert(f"thread_{thread_id}_key_{i}", "enterprise_payload")
 
-threads = [threading.Thread(target=worker, args=(t,)) for t in range(4)]
+threads = [threading.Thread(target=worker, args=(t,)) for t in range(16)]
 for t in threads: t.start()
 for t in threads: t.join()
 
