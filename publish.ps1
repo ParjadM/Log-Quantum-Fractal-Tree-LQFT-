@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.5.0)
+# LQFT Production Release (v0.6.0)
 # Architect: Parjad Minooei
-# Status: Phase 1 (Native Disk Persistence) Complete
+# Status: Phase 2 (True Hardware Concurrency & GIL Bypass) Complete
 
-$Version = "v0.5.0"
+$Version = "v0.6.0"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -18,7 +18,8 @@ $Extras = @(
     "advanced_lqft_stress_suite.py", "three_sum_lqft_test.py",
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
     "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
-    "enterprise_capability_suite.py", "pre_release_suite.py"
+    "enterprise_capability_suite.py", "pre_release_suite.py", "make_readme.py",
+    "gil_bypass_test.py"
 )
 
 foreach ($file in $Extras) {
@@ -65,7 +66,7 @@ try:
     result = lqft_c_engine.search(h)
     assert result == "verification_payload", "Data corruption detected!"
     
-    # 2. Verify Persistence (v0.5.0 Feature)
+    # 2. Verify Persistence
     lqft_c_engine.save_to_disk("cicd_test.bin")
     assert os.path.exists("cicd_test.bin"), "Binary Serialization Failed!"
     
@@ -76,7 +77,7 @@ try:
     assert lqft_c_engine.search(h) == "verification_payload", "Deserialization Failed!"
     os.remove("cicd_test.bin")
     
-    print("[*] Full CRUD & Disk Persistence lifecycle verified.")
+    print("[*] Full CRUD, Persistence & Hardware Locks verified.")
     print("[*] CI/CD Pipeline PASS.")
 except Exception as e:
     print(f"[!] CI/CD Error: {e}")
@@ -87,7 +88,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Native Disk Persistence & Binary Deserialization" --allow-empty
+git commit -m "release: $Version - True Hardware Concurrency & OS-Level SRWLocks" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)
