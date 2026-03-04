@@ -27,8 +27,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.3.0", 
-    description="LQFT Engine: Memory Circuit Breaker & Strict Type Safety (v5.0 Stable)",
+    version="0.5.0", 
+    description="LQFT Engine: Native Disk Persistence & Cold Start Deserialization (v5.0 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",

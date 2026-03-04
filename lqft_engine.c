@@ -11,28 +11,27 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine - V5.0 (Active ARC Deletion & Full CRUD)
+ * LQFT C-Engine - V0.5.0 (Native Disk Persistence)
  * Architect: Parjad Minooei
  * * CHANGE LOG:
- * - Implemented Automatic Reference Counting (ARC).
- * - Added cascading `decref` for immediate RAM reclamation on deletion.
- * - Added Open-Addressing Tombstones to the Global Registry.
- * - Resolved all GCC -Wsign-compare warnings for production-grade builds.
+ * - Implemented Binary Serialization (save_to_disk).
+ * - Implemented O(1) Cold Start Deserialization (load_from_disk).
+ * - DAG Pointer Reconstruction Logic.
  */
 
 #define BIT_PARTITION 5
 #define MAX_BITS 64 
 #define MASK 0x1F 
 #define REGISTRY_SIZE 8000009 
-#define TOMBSTONE ((LQFTNode*)1) // Special pointer for freed registry slots
+#define TOMBSTONE ((LQFTNode*)1)
 
 typedef struct LQFTNode {
     void* value;
     uint64_t key_hash;
     struct LQFTNode* children[32]; 
     char struct_hash[17]; 
-    uint64_t full_hash_val; // Cached for O(1) registry removal
-    int ref_count;          // Tracks active branch dependencies
+    uint64_t full_hash_val;
+    int ref_count;
 } LQFTNode;
 
 static LQFTNode** registry = NULL;
@@ -43,7 +42,7 @@ const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
 const uint64_t FNV_PRIME = 1099511628211ULL;
 
 // -------------------------------------------------------------------
-// Core Hashing & Memory Utilities
+// Utilities
 // -------------------------------------------------------------------
 uint64_t fnv1a_update(uint64_t hash, const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
@@ -77,32 +76,23 @@ LQFTNode* create_node(void* value, uint64_t key_hash) {
     node->value = value;
     node->key_hash = key_hash;
     node->full_hash_val = 0;
-    node->ref_count = 0; // Starts at 0 until adopted by a parent
+    node->ref_count = 0;
     for (int i = 0; i < 32; i++) node->children[i] = NULL;
     return node;
 }
 
 // -------------------------------------------------------------------
-// Active ARC Deletion Logic
+// Memory Management (ARC)
 // -------------------------------------------------------------------
 void decref(LQFTNode* node) {
     if (!node) return;
-    
     node->ref_count--;
-    
-    // If no branches point to this node anymore, obliterate it.
     if (node->ref_count <= 0) {
-        // 1. Cascade destruction to children
         for (int i = 0; i < 32; i++) {
-            if (node->children[i]) {
-                decref(node->children[i]);
-            }
+            if (node->children[i]) decref(node->children[i]);
         }
-        
-        // 2. Remove from global registry (Replace with Tombstone)
         uint32_t idx = node->full_hash_val % REGISTRY_SIZE;
         uint32_t start_idx = idx;
-        
         while (registry[idx] != NULL) {
             if (registry[idx] == node) {
                 registry[idx] = TOMBSTONE;
@@ -111,16 +101,171 @@ void decref(LQFTNode* node) {
             idx = (idx + 1) % REGISTRY_SIZE;
             if (idx == start_idx) break;
         }
-        
-        // 3. Physically free memory back to the OS
         if (node->value) free(node->value);
         free(node);
         physical_node_count--;
     }
 }
 
+static PyObject* method_free_all(PyObject* self, PyObject* args) {
+    if (registry != NULL) {
+        for (int i = 0; i < REGISTRY_SIZE; i++) {
+            if (registry[i] != NULL && registry[i] != TOMBSTONE) {
+                if (registry[i]->value) free(registry[i]->value);
+                free(registry[i]);
+            }
+            registry[i] = NULL;
+        }
+        free(registry);
+        registry = NULL;
+    }
+    physical_node_count = 0;
+    global_root = NULL;
+    Py_RETURN_NONE;
+}
+
 // -------------------------------------------------------------------
-// Merkle-DAG Deduplication
+// Disk Persistence (Binary Serialization)
+// -------------------------------------------------------------------
+static PyObject* method_save_to_disk(PyObject* self, PyObject* args) {
+    const char* filepath;
+    if (!PyArg_ParseTuple(args, "s", &filepath)) return NULL;
+    if (!registry) Py_RETURN_NONE;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return PyErr_SetFromErrno(PyExc_IOError);
+
+    // Header: Magic Bytes, Count, Global Root Hash
+    char magic[4] = "LQFT";
+    fwrite(magic, 1, 4, fp);
+    fwrite(&physical_node_count, sizeof(int), 1, fp);
+    uint64_t root_hash = global_root ? global_root->full_hash_val : 0;
+    fwrite(&root_hash, sizeof(uint64_t), 1, fp);
+
+    // Dump Nodes
+    for (int i = 0; i < REGISTRY_SIZE; i++) {
+        LQFTNode* node = registry[i];
+        if (node != NULL && node != TOMBSTONE) {
+            fwrite(&node->full_hash_val, sizeof(uint64_t), 1, fp);
+            fwrite(&node->key_hash, sizeof(uint64_t), 1, fp);
+            fwrite(node->struct_hash, 1, 17, fp);
+            fwrite(&node->ref_count, sizeof(int), 1, fp);
+
+            // Payload
+            int has_val = (node->value != NULL) ? 1 : 0;
+            fwrite(&has_val, sizeof(int), 1, fp);
+            if (has_val) {
+                int v_len = (int)strlen((char*)node->value);
+                fwrite(&v_len, sizeof(int), 1, fp);
+                fwrite(node->value, 1, v_len, fp);
+            }
+
+            // Children pointers (saved as full_hash_val references)
+            uint64_t child_refs[32] = {0};
+            for (int c = 0; c < 32; c++) {
+                if (node->children[c]) child_refs[c] = node->children[c]->full_hash_val;
+            }
+            fwrite(child_refs, sizeof(uint64_t), 32, fp);
+        }
+    }
+
+    fclose(fp);
+    Py_RETURN_TRUE;
+}
+
+LQFTNode* find_in_registry(uint64_t full_hash) {
+    if (full_hash == 0) return NULL;
+    uint32_t idx = full_hash % REGISTRY_SIZE;
+    uint32_t start_idx = idx;
+    while (registry[idx] != NULL) {
+        if (registry[idx] != TOMBSTONE && registry[idx]->full_hash_val == full_hash) {
+            return registry[idx];
+        }
+        idx = (idx + 1) % REGISTRY_SIZE;
+        if (idx == start_idx) break;
+    }
+    return NULL;
+}
+
+static PyObject* method_load_from_disk(PyObject* self, PyObject* args) {
+    const char* filepath;
+    if (!PyArg_ParseTuple(args, "s", &filepath)) return NULL;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return PyErr_SetFromErrno(PyExc_IOError);
+
+    char magic[5] = {0};
+    fread(magic, 1, 4, fp);
+    if (strcmp(magic, "LQFT") != 0) {
+        fclose(fp);
+        PyErr_SetString(PyExc_ValueError, "Invalid LQFT binary file format.");
+        return NULL;
+    }
+
+    // Clear current state safely
+    method_free_all(self, NULL);
+    init_registry();
+
+    int total_nodes;
+    uint64_t root_hash;
+    fread(&total_nodes, sizeof(int), 1, fp);
+    fread(&root_hash, sizeof(uint64_t), 1, fp);
+
+    // Parallel array to store child hashes for Pass 2 (Pointer Reconstruction)
+    uint64_t* all_child_refs = (uint64_t*)malloc(total_nodes * 32 * sizeof(uint64_t));
+    LQFTNode** loaded_nodes = (LQFTNode**)malloc(total_nodes * sizeof(LQFTNode*));
+
+    // PASS 1: Read physical nodes into memory
+    for (int i = 0; i < total_nodes; i++) {
+        LQFTNode* node = create_node(NULL, 0);
+        fread(&node->full_hash_val, sizeof(uint64_t), 1, fp);
+        fread(&node->key_hash, sizeof(uint64_t), 1, fp);
+        fread(node->struct_hash, 1, 17, fp);
+        fread(&node->ref_count, sizeof(int), 1, fp);
+
+        int has_val;
+        fread(&has_val, sizeof(int), 1, fp);
+        if (has_val) {
+            int v_len;
+            fread(&v_len, sizeof(int), 1, fp);
+            char* val_str = (char*)malloc(v_len + 1);
+            fread(val_str, 1, v_len, fp);
+            val_str[v_len] = '\0';
+            node->value = val_str;
+        }
+
+        fread(&all_child_refs[i * 32], sizeof(uint64_t), 32, fp);
+
+        // Insert directly into registry
+        uint32_t idx = node->full_hash_val % REGISTRY_SIZE;
+        while (registry[idx] != NULL) idx = (idx + 1) % REGISTRY_SIZE;
+        registry[idx] = node;
+        
+        loaded_nodes[i] = node;
+        physical_node_count++;
+    }
+
+    // PASS 2: Pointer Reconstruction (Relinking the DAG)
+    for (int i = 0; i < total_nodes; i++) {
+        for (int c = 0; c < 32; c++) {
+            uint64_t target_hash = all_child_refs[i * 32 + c];
+            if (target_hash != 0) {
+                loaded_nodes[i]->children[c] = find_in_registry(target_hash);
+            }
+        }
+    }
+
+    global_root = find_in_registry(root_hash);
+
+    free(all_child_refs);
+    free(loaded_nodes);
+    fclose(fp);
+
+    Py_RETURN_TRUE;
+}
+
+// -------------------------------------------------------------------
+// Merkle-DAG Core (Standard Operations)
 // -------------------------------------------------------------------
 LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     if (!init_registry()) return NULL;
@@ -148,26 +293,23 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     uint32_t start_idx = idx;
     int first_tombstone = -1;
 
-    // Search registry (Skipping Tomestones)
     while (registry[idx] != NULL) {
         if (registry[idx] == TOMBSTONE) {
             if (first_tombstone == -1) first_tombstone = (int)idx;
         } else if (registry[idx]->full_hash_val == full_hash && strcmp(registry[idx]->struct_hash, lookup_hash) == 0) {
-            if (value) free(value); // Free duplicate string payload
+            if (value) free(value);
             return registry[idx];
         }
         idx = (idx + 1) % REGISTRY_SIZE;
         if (idx == start_idx) break; 
     }
 
-    // Create a physical new node if identity doesn't exist
     LQFTNode* new_node = create_node(value, key_hash);
     if (!new_node) return NULL;
     
     if (children) {
         for (int i = 0; i < 32; i++) {
             new_node->children[i] = children[i];
-            // Anchor the child to this new parent
             if (children[i]) children[i]->ref_count++; 
         }
     }
@@ -175,69 +317,11 @@ LQFTNode* get_canonical(void* value, uint64_t key_hash, LQFTNode** children) {
     strcpy(new_node->struct_hash, lookup_hash);
     new_node->full_hash_val = full_hash;
     
-    // Insert into registry (Reusing tombstones if possible)
-    // SYSTEM FIX: Explicitly cast first_tombstone to uint32_t to match idx
     uint32_t insert_idx = (first_tombstone != -1) ? (uint32_t)first_tombstone : idx;
     registry[insert_idx] = new_node;
     physical_node_count++;
     
     return new_node;
-}
-
-// -------------------------------------------------------------------
-// Python Wrapper API
-// -------------------------------------------------------------------
-static PyObject* method_delete(PyObject* self, PyObject* args) {
-    unsigned long long h;
-    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    if (!global_root) Py_RETURN_NONE;
-
-    LQFTNode* path_nodes[20]; 
-    uint32_t path_segs[20];
-    int path_len = 0;
-    LQFTNode* curr = global_root;
-    int bit_depth = 0;
-
-    while (curr != NULL && curr->value == NULL) {
-        uint32_t segment = (h >> bit_depth) & MASK;
-        path_nodes[path_len] = curr;
-        path_segs[path_len] = segment;
-        path_len++;
-        curr = curr->children[segment];
-        bit_depth += BIT_PARTITION;
-    }
-
-    // Key not found, abort
-    if (curr == NULL || curr->key_hash != h) Py_RETURN_NONE;
-
-    LQFTNode* old_root = global_root;
-    LQFTNode* new_sub_node = NULL;
-
-    for (int i = path_len - 1; i >= 0; i--) {
-        LQFTNode* p_node = path_nodes[i];
-        uint32_t segment = path_segs[i];
-        LQFTNode* new_children[32];
-        int has_other_children = 0;
-
-        // SYSTEM FIX: Use uint32_t for j to safely compare with segment
-        for (uint32_t j = 0; j < 32; j++) {
-            if (j == segment) new_children[j] = new_sub_node;
-            else {
-                new_children[j] = p_node->children[j];
-                if (new_children[j]) has_other_children = 1;
-            }
-        }
-
-        if (!has_other_children && i > 0) new_sub_node = NULL;
-        else new_sub_node = get_canonical(NULL, 0, new_children);
-    }
-
-    // Anchor new root and release the old one
-    global_root = (new_sub_node) ? new_sub_node : get_canonical(NULL, 0, NULL);
-    if (global_root) global_root->ref_count++;
-    if (old_root) decref(old_root); // Trigger Active Deletion Cascade
-
-    Py_RETURN_NONE;
 }
 
 static PyObject* method_insert(PyObject* self, PyObject* args) {
@@ -313,10 +397,9 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
         }
     }
     
-    // Anchor new root and release the old one
     global_root = new_sub_node;
     global_root->ref_count++;
-    if (old_root) decref(old_root); // Trigger Active Deletion Cascade
+    if (old_root) decref(old_root); 
 
     Py_RETURN_NONE;
 }
@@ -338,20 +421,53 @@ static PyObject* method_search(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* method_free_all(PyObject* self, PyObject* args) {
-    if (registry != NULL) {
-        for (int i = 0; i < REGISTRY_SIZE; i++) {
-            if (registry[i] != NULL && registry[i] != TOMBSTONE) {
-                if (registry[i]->value) free(registry[i]->value);
-                free(registry[i]);
-            }
-            registry[i] = NULL;
-        }
-        free(registry);
-        registry = NULL;
+static PyObject* method_delete(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    if (!global_root) Py_RETURN_NONE;
+
+    LQFTNode* path_nodes[20]; 
+    uint32_t path_segs[20];
+    int path_len = 0;
+    LQFTNode* curr = global_root;
+    int bit_depth = 0;
+
+    while (curr != NULL && curr->value == NULL) {
+        uint32_t segment = (h >> bit_depth) & MASK;
+        path_nodes[path_len] = curr;
+        path_segs[path_len] = segment;
+        path_len++;
+        curr = curr->children[segment];
+        bit_depth += BIT_PARTITION;
     }
-    physical_node_count = 0;
-    global_root = NULL;
+
+    if (curr == NULL || curr->key_hash != h) Py_RETURN_NONE;
+
+    LQFTNode* old_root = global_root;
+    LQFTNode* new_sub_node = NULL;
+
+    for (int i = path_len - 1; i >= 0; i--) {
+        LQFTNode* p_node = path_nodes[i];
+        uint32_t segment = path_segs[i];
+        LQFTNode* new_children[32];
+        int has_other_children = 0;
+
+        for (uint32_t j = 0; j < 32; j++) {
+            if (j == segment) new_children[j] = new_sub_node;
+            else {
+                new_children[j] = p_node->children[j];
+                if (new_children[j]) has_other_children = 1;
+            }
+        }
+
+        if (!has_other_children && i > 0) new_sub_node = NULL;
+        else new_sub_node = get_canonical(NULL, 0, new_children);
+    }
+
+    global_root = (new_sub_node) ? new_sub_node : get_canonical(NULL, 0, NULL);
+    if (global_root) global_root->ref_count++;
+    if (old_root) decref(old_root); 
+
     Py_RETURN_NONE;
 }
 
@@ -361,13 +477,14 @@ static PyObject* method_get_metrics(PyObject* self, PyObject* args) {
 
 static PyMethodDef LQFTMethods[] = {
     {"insert", method_insert, METH_VARARGS, "Insert key-value"},
-    {"delete", method_delete, METH_VARARGS, "Active ARC Delete key"},
+    {"delete", method_delete, METH_VARARGS, "Delete key"},
     {"search", method_search, METH_VARARGS, "Search key"},
-    {"get_metrics", method_get_metrics, METH_VARARGS, "Get engine stats"},
+    {"save_to_disk", method_save_to_disk, METH_VARARGS, "Serialize to .bin"},
+    {"load_from_disk", method_load_from_disk, METH_VARARGS, "Deserialize from .bin"},
+    {"get_metrics", method_get_metrics, METH_VARARGS, "Get stats"},
     {"free_all", method_free_all, METH_VARARGS, "Total memory wipe"},
     {NULL, NULL, 0, NULL}
 };
 
 static struct PyModuleDef lqftmodule = { PyModuleDef_HEAD_INIT, "lqft_c_engine", NULL, -1, LQFTMethods };
-
 PyMODINIT_FUNC PyInit_lqft_c_engine(void) { return PyModule_Create(&lqftmodule); }

@@ -2,6 +2,7 @@ import hashlib
 import weakref
 import psutil
 import os
+import json
 
 # ---------------------------------------------------------
 # LEGACY PURE PYTHON LQFT (For reference/fallback)
@@ -104,9 +105,8 @@ class LQFT:
             if bit_depth >= self.max_bits: break
         return None
 
-
 # ---------------------------------------------------------
-# ADAPTIVE ENTERPRISE ENGINE (v0.3.0)
+# ADAPTIVE ENTERPRISE ENGINE (v0.5.0 - Disk Persistence)
 # ---------------------------------------------------------
 try:
     import lqft_c_engine
@@ -115,62 +115,74 @@ except ImportError:
     C_ENGINE_READY = False
 
 class AdaptiveLQFT:
-    """
-    A polymorphic, heuristic-driven data structure wrapper.
-    - Scale < threshold: Acts as an ultra-lightweight C-Hash (Python Dict).
-    - Scale > threshold: Automatically migrates to the Native C-Engine LQFT 
-      for Merkle-DAG deduplication and folding.
-    """
     def __init__(self, migration_threshold=50000):
         self.threshold = migration_threshold
         self.size = 0
         self.is_native = False
         self._light_store = {} 
         
-        # --- Systems Architecture: Process Memory Limit ---
         self.auto_purge_enabled = True
-        # Instead of global OS RAM, we set a hard cap for THIS specific process.
-        self.max_memory_mb = 1000.0 # 1 Gigabyte Limit
+        self.max_memory_mb = 1000.0 
         self.total_ops = 0
         self._process = psutil.Process(os.getpid())
 
     def _validate_type(self, key, value=None):
-        """Strict type guarding to prevent arbitrary objects from bleeding into C-Memory."""
         if not isinstance(key, str):
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if value is not None and not isinstance(value, str):
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
 
     def _get_64bit_hash(self, key):
-        """Generates a 64-bit unsigned hash for the C-Engine."""
         return int(hashlib.md5(key.encode()).hexdigest()[:16], 16)
 
+    def set_auto_purge_threshold(self, threshold: float):
+        self.purge_threshold = threshold
+
     def purge(self):
-        """Manual Purge Override to instantly free RAM."""
         current_mb = self._process.memory_info().rss / (1024 * 1024)
         if current_mb >= self.max_memory_mb:
             print(f"\n[⚠️ CIRCUIT Breaker] Engine exceeded {self.max_memory_mb} MB limit (Currently {current_mb:.1f} MB). Auto-Purging!")
         self.clear()
 
-    def _migrate_to_native(self):
-        """The 'Curve Flip' mechanism: moves all data to the Heavy Engine."""
-        if not C_ENGINE_READY:
-            print("[!] Warning: C-Engine missing. Staying in lightweight mode.")
-            self.threshold = float('inf') # Prevent continuous upgrade attempts
-            return
+    # --- Phase 1: Native Disk Persistence ---
+    def save_to_disk(self, filepath: str):
+        """Serializes the engine state to disk (O(1) Time context scaling)."""
+        if not self.is_native:
+            with open(filepath, 'w') as f:
+                json.dump(self._light_store, f)
+        else:
+            lqft_c_engine.save_to_disk(filepath)
+
+    def load_from_disk(self, filepath: str):
+        """Instantly reconstructs C-Pointers from a binary file."""
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Missing LQFT database file: {filepath}")
             
+        if not self.is_native:
+            # Check if it's a C-Engine binary file (magic bytes "LQFT")
+            with open(filepath, 'rb') as f:
+                if f.read(4) == b'LQFT':
+                    self._migrate_to_native()
+                    lqft_c_engine.load_from_disk(filepath)
+                    return
+            with open(filepath, 'r') as f:
+                self._light_store = json.load(f)
+                self.size = len(self._light_store)
+        else:
+            lqft_c_engine.load_from_disk(filepath)
+
+    def _migrate_to_native(self):
+        if not C_ENGINE_READY:
+            self.threshold = float('inf') 
+            return
         for key, val in self._light_store.items():
             h = self._get_64bit_hash(key)
             lqft_c_engine.insert(h, val)
-            
         self._light_store.clear()
         self.is_native = True
 
     def insert(self, key, value):
-        # 1. Type Guard (Blocks the Poison Pill test)
         self._validate_type(key, value)
-
-        # 2. Performance Safety: Process Memory Check
         self.total_ops += 1
         if self.auto_purge_enabled and self.total_ops % 5000 == 0:
             current_mb = self._process.memory_info().rss / (1024 * 1024)
@@ -181,7 +193,6 @@ class AdaptiveLQFT:
             if key not in self._light_store: 
                 self.size += 1
             self._light_store[key] = value
-            
             if self.size >= self.threshold: 
                 self._migrate_to_native()
         else:
@@ -190,7 +201,6 @@ class AdaptiveLQFT:
 
     def remove(self, key):
         self._validate_type(key)
-        
         if not self.is_native:
             if key in self._light_store:
                 del self._light_store[key]
@@ -204,7 +214,6 @@ class AdaptiveLQFT:
 
     def search(self, key):
         self._validate_type(key)
-        
         if not self.is_native: 
             return self._light_store.get(key, None)
         else:
@@ -224,10 +233,8 @@ class AdaptiveLQFT:
         return {"physical_nodes": 0}
 
     def __del__(self):
-        try: 
-            self.clear()
-        except: 
-            pass
+        try: self.clear()
+        except: pass
 
     def status(self):
         return {

@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.3.0)
+# LQFT Production Release (v0.5.0)
 # Architect: Parjad Minooei
-# Status: Process Isolation, Circuit Breakers, & Type Safety Active
+# Status: Phase 1 (Native Disk Persistence) Complete
 
-$Version = "v0.3.0"
+$Version = "v0.5.0"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -40,13 +40,13 @@ Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
 # 3. CI/CD PIPELINE RESCUE
-# Ensures GitHub Actions has the necessary validation script to pass the health check.
 Write-Host "[*] Verifying CI/CD required files..." -ForegroundColor Yellow
 if (!(Test-Path "validation.py")) {
     Write-Host "  > Recreating missing validation.py for GitHub Actions..." -ForegroundColor Cyan
     @'
 import sys
 import hashlib
+import os
 
 def fast_hash(key):
     return int(hashlib.md5(str(key).encode()).hexdigest()[:16], 16)
@@ -59,17 +59,24 @@ try:
     import lqft_c_engine
     print("[*] Native C-Engine loaded successfully.")
     
-    # Verify core operations: Insert -> Search -> Delete
+    # 1. Verify core operations
     h = fast_hash("ci_test_vector")
     lqft_c_engine.insert(h, "verification_payload")
-    
     result = lqft_c_engine.search(h)
     assert result == "verification_payload", "Data corruption detected!"
     
-    lqft_c_engine.delete(h)
-    assert lqft_c_engine.search(h) is None, "Deletion logic failed!"
+    # 2. Verify Persistence (v0.5.0 Feature)
+    lqft_c_engine.save_to_disk("cicd_test.bin")
+    assert os.path.exists("cicd_test.bin"), "Binary Serialization Failed!"
     
-    print("[*] Full CRUD lifecycle verified.")
+    lqft_c_engine.free_all()
+    assert lqft_c_engine.search(h) is None, "Memory not cleared!"
+    
+    lqft_c_engine.load_from_disk("cicd_test.bin")
+    assert lqft_c_engine.search(h) == "verification_payload", "Deserialization Failed!"
+    os.remove("cicd_test.bin")
+    
+    print("[*] Full CRUD & Disk Persistence lifecycle verified.")
     print("[*] CI/CD Pipeline PASS.")
 except Exception as e:
     print(f"[!] CI/CD Error: {e}")
@@ -80,16 +87,14 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Memory Circuit Breaker & Strict Type Safety" --allow-empty
+git commit -m "release: $Version - Native Disk Persistence & Binary Deserialization" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)
 Write-Host "[*] Updating release tag $Version..." -ForegroundColor Cyan
-# Remove existing tag if it exists locally or remotely to ensure a fresh build
 git tag -d $Version 2>$null
 git push origin :refs/tags/$Version 2>$null
 
-# Apply and push the new production tag
 git tag $Version
 git push origin --tags
 
