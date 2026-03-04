@@ -14,24 +14,24 @@ By offloading core associative logic to a native C-Extension, the LQFT completel
 
 ---
 
-## 🧠 Core Architecture (v0.6.0 Enterprise Release)
+## 🧠 Core Architecture (v0.7.0 Strict Native Release)
 
-### 1. True Hardware Concurrency & GIL Bypass (New in v0.6.0)
+### 1. Strict C-Core Enforcement (New in v0.7.0)
+The legacy pure-Python fallback heuristics have been entirely stripped out. The LQFT now operates strictly as a zero-overhead FFI wrapper directly communicating with the underlying unmanaged C memory heap.
+
+### 2. True Hardware Concurrency & GIL Bypass
 The engine utilizes native OS-level read-write locks (`SRWLOCK` on Windows, `pthread_rwlock_t` on POSIX) combined with `Py_BEGIN_ALLOW_THREADS`. 
 * **Multi-Core Scaling:** Multiple Python threads can read and write to the Merkle-DAG simultaneously across all physical CPU cores without Segmentation Faults.
 * **Zero GIL Contention:** The C-Engine entirely decouples from the Python interpreter during execution.
 
-### 2. Scale-Invariant Time Complexity: $O(1)$
+### 3. Scale-Invariant Time Complexity: $O(1)$
 The LQFT utilizes a fixed 64-bit hash space partitioned into 13 levels. 
 * **Deterministic Latency:** Every search or insertion requires exactly 13 pointer hops.
 * **Scale-Invariance:** Performance remains constant whether the dataset contains 10^3 or 10^9 items.
 
-### 3. Entropy-Based Space Complexity: $O(\Sigma)$
+### 4. Entropy-Based Space Complexity: $O(\Sigma)$
 Nodes are identified by the cryptographic hash of their contents and child pointers (Merkle-DAG).
 * **Structural Folding:** Identical sub-trees are shared physically in memory across different branches or versions.
-
-### 4. Native Disk Persistence
-Functions as a true Database Engine. Serialize memory layout directly to disk as a dense binary file for instant $O(1)$ cold-start deserialization.
 
 ---
 
@@ -68,11 +68,11 @@ python setup.py build_ext --inplace
 The LQFT provides a Pythonic interface to its high-performance C-backend.
 
 ```python
-from lqft_engine import AdaptiveLQFT
+from lqft_engine import LQFT
 import threading
 
-# Initialize the Adaptive Wrapper
-db = AdaptiveLQFT(migration_threshold=50000)
+# Initialize the Strict Native Engine
+db = LQFT()
 
 # The C-Engine releases the GIL, allowing true multi-threading
 def worker(thread_id):
@@ -83,7 +83,7 @@ threads = [threading.Thread(target=worker, args=(t,)) for t in range(4)]
 for t in threads: t.start()
 for t in threads: t.join()
 
-# --- Phase 1: Disk Persistence ---
+# --- Native Disk Persistence ---
 db.save_to_disk("production_state.bin")
 db.clear()
 db.load_from_disk("production_state.bin")
