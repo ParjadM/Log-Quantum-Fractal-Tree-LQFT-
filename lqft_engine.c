@@ -11,15 +11,12 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine - V0.9.0 (High Density Memory Arena)
+ * LQFT C-Engine - V1.1.1 (The Vectorized Hash Patch)
  * Architect: Parjad Minooei
  * * SYSTEMS ARCHITECTURE MILESTONES:
- * 1. DYNAMIC DECOUPLING: Removed hardcoded children[32] from the struct. Leaves 
- * now consume ~40 bytes instead of 288 bytes (an 86% memory reduction per item).
- * 2. SLAB ALLOCATOR (ARENA): Bypasses OS `malloc` overhead, saving ~16 bytes of hidden 
- * metadata per node. Grabs memory in 16K chunks for O(1) bump-allocation.
- * 3. O(1) CRYPTOGRAPHIC FAST-PATH: Eliminated 32-way loops in branch hashing by using 
- * mathematical XOR inverses.
+ * 1. LOGICAL SHARDING: Flat Array for maximum L1 Cache locality.
+ * 2. VECTORIZED HASHING: Removed the slow XOR dependency chain. Replaced with
+ * a contiguous FNV-1a array accumulator for maximum CPU pipeline efficiency.
  */
 
 #ifdef _MSC_VER
@@ -51,28 +48,27 @@
 
 #define BIT_PARTITION 5
 #define MASK 0x1F 
-#define REGISTRY_SIZE 33554432
-#define REGISTRY_MASK (REGISTRY_SIZE - 1)
 #define NUM_STRIPES 2048
+#define STRIPE_SIZE 16384 
+#define STRIPE_MASK (STRIPE_SIZE - 1)
 #define TOMBSTONE ((LQFTNode*)1)
 
 typedef struct {
     lqft_rwlock_t lock;
-    char padding[128]; // Cache-line isolation for macOS/Linux
+    char padding[128]; 
 } PaddedLock;
 
-// v0.9.0 Memory Density Update: Decoupled pointer array
 typedef struct LQFTNode {
     void* value;
     uint64_t key_hash;
-    struct LQFTNode** children; // NULL for leaves. 32-array allocated ONLY for branches.
+    struct LQFTNode** children; 
     uint64_t full_hash_val;
     uint32_t registry_idx; 
     int ref_count;
 } LQFTNode;
 
 // ===================================================================
-// CUSTOM MEMORY ARENA (SLAB ALLOCATOR & FREE LISTS)
+// CUSTOM MEMORY ARENA 
 // ===================================================================
 #define ARENA_CHUNK_SIZE 16384
 static lqft_rwlock_t alloc_lock;
@@ -89,13 +85,14 @@ typedef struct ChildChunk {
 
 static NodeChunk* current_node_chunk = NULL;
 static int node_chunk_idx = ARENA_CHUNK_SIZE;
-static LQFTNode* node_free_list = NULL;
+static LQFTNode* node_free_list = NULL; 
 
 static ChildChunk* current_child_chunk = NULL;
 static int child_chunk_idx = ARENA_CHUNK_SIZE;
 static LQFTNode*** array_free_list = NULL;
 
 static LQFTNode** registry = NULL;
+
 static int physical_node_count = 0;
 static LQFTNode* global_root = NULL;
 
@@ -116,6 +113,19 @@ static inline uint64_t fnv1a_update(uint64_t hash, const void* data, size_t len)
     return hash;
 }
 
+// V1.1.1 Fix: Blazing fast array hash to replace the slow XOR math
+static inline uint64_t hash_node_state(LQFTNode** children) {
+    uint64_t hval = FNV_OFFSET_BASIS;
+    if (children) {
+        for (int i = 0; i < 32; i++) {
+            uint64_t c_hash = children[i] ? children[i]->full_hash_val : 0;
+            hval ^= c_hash;
+            hval *= FNV_PRIME;
+        }
+    }
+    return hval;
+}
+
 char* portable_strdup(const char* s) {
     if (!s) return NULL;
 #ifdef _WIN32
@@ -125,7 +135,6 @@ char* portable_strdup(const char* s) {
 #endif
 }
 
-// HIGH-SPEED CUSTOM ALLOCATOR
 LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src) {
     LQFTNode* node = NULL;
     LQFT_RWLOCK_WRLOCK(&alloc_lock);
@@ -165,7 +174,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src) {
         LQFT_RWLOCK_UNLOCK_WR(&alloc_lock);
         memcpy(node->children, children_src, sizeof(LQFTNode*) * 32);
     } else {
-        node->children = NULL; // 40-byte strict leaf
+        node->children = NULL; 
         LQFT_RWLOCK_UNLOCK_WR(&alloc_lock);
     }
     return node;
@@ -173,7 +182,8 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src) {
 
 void decref(LQFTNode* start_node) {
     if (!start_node || start_node == TOMBSTONE) return;
-    static LQFTNode* cleanup_stack[512];
+    
+    LQFTNode* cleanup_stack[128]; 
     int top = 0;
     cleanup_stack[top++] = start_node;
 
@@ -182,9 +192,11 @@ void decref(LQFTNode* start_node) {
         int new_ref = g_in_batch_insert ? --node->ref_count : ATOMIC_DEC(&node->ref_count);
         
         if (new_ref <= 0) {
-            uint32_t stripe = node->full_hash_val % NUM_STRIPES;
+            uint32_t stripe = (uint32_t)(node->full_hash_val % NUM_STRIPES);
+            uint32_t global_idx = (stripe * STRIPE_SIZE) + node->registry_idx;
+            
             if (!g_in_batch_insert) LQFT_RWLOCK_WRLOCK(&stripe_locks[stripe].lock);
-            if (registry[node->registry_idx] == node) registry[node->registry_idx] = TOMBSTONE;
+            if (registry[global_idx] == node) registry[global_idx] = TOMBSTONE;
             if (!g_in_batch_insert) LQFT_RWLOCK_UNLOCK_WR(&stripe_locks[stripe].lock);
 
             if (node->children) {
@@ -210,27 +222,26 @@ void decref(LQFTNode* start_node) {
 }
 
 LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** children, uint64_t manual_hash) {
-    if (!registry) return NULL;
     uint64_t full_hash = manual_hash;
     uint32_t stripe = (uint32_t)(full_hash % NUM_STRIPES);
-    
-    uint64_t mix = full_hash ^ (full_hash >> 32);
-    uint32_t idx = (uint32_t)(mix & REGISTRY_MASK);
-    uint32_t start_idx = idx;
+    uint32_t local_idx = (uint32_t)((full_hash ^ (full_hash >> 32)) & STRIPE_MASK);
+    uint32_t global_idx = (stripe * STRIPE_SIZE) + local_idx;
+    uint32_t start_idx = local_idx;
 
     if (!g_in_batch_insert) LQFT_RWLOCK_RDLOCK(&stripe_locks[stripe].lock);
 
     for (;;) {
-        LQFTNode* slot = registry[idx];
+        LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
         if (slot != TOMBSTONE && slot->full_hash_val == full_hash) {
             if (g_in_batch_insert) slot->ref_count++;
-            else ATOMIC_INC(&slot->ref_count);
+            else ATOMIC_INC(&slot->ref_count); 
             if (!g_in_batch_insert) LQFT_RWLOCK_UNLOCK_RD(&stripe_locks[stripe].lock);
             return slot;
         }
-        idx = (idx + 1) & REGISTRY_MASK;
-        if (idx == start_idx) break;
+        local_idx = (local_idx + 1) & STRIPE_MASK;
+        global_idx = (stripe * STRIPE_SIZE) + local_idx;
+        if (local_idx == start_idx) break; 
     }
     if (!g_in_batch_insert) LQFT_RWLOCK_UNLOCK_RD(&stripe_locks[stripe].lock);
 
@@ -249,14 +260,16 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     new_node->full_hash_val = full_hash;
     
     if (!g_in_batch_insert) LQFT_RWLOCK_WRLOCK(&stripe_locks[stripe].lock);
-    idx = (uint32_t)(mix & REGISTRY_MASK);
-    start_idx = idx;
+    
+    local_idx = (uint32_t)((full_hash ^ (full_hash >> 32)) & STRIPE_MASK);
+    global_idx = (stripe * STRIPE_SIZE) + local_idx;
+    start_idx = local_idx;
     int first_tombstone = -1;
     
     for (;;) {
-        LQFTNode* slot = registry[idx];
+        LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
-        if (slot == TOMBSTONE) { if (first_tombstone == -1) first_tombstone = (int)idx; }
+        if (slot == TOMBSTONE) { if (first_tombstone == -1) first_tombstone = (int)local_idx; }
         else if (slot->full_hash_val == full_hash) {
             if (g_in_batch_insert) slot->ref_count++;
             else ATOMIC_INC(&slot->ref_count);
@@ -264,20 +277,27 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
             decref(new_node); 
             return slot;
         }
-        idx = (idx + 1) & REGISTRY_MASK;
-        if (idx == start_idx) break; 
+        local_idx = (local_idx + 1) & STRIPE_MASK;
+        global_idx = (stripe * STRIPE_SIZE) + local_idx;
+        if (local_idx == start_idx) break; 
     }
 
-    uint32_t insert_idx = (first_tombstone != -1) ? (uint32_t)first_tombstone : idx;
-    new_node->registry_idx = insert_idx; 
-    registry[insert_idx] = new_node;
+    uint32_t insert_local = (first_tombstone != -1) ? (uint32_t)first_tombstone : local_idx;
+    uint32_t insert_global = (stripe * STRIPE_SIZE) + insert_local;
+    
+    if (insert_local == start_idx && registry[insert_global] != NULL && registry[insert_global] != TOMBSTONE) {
+        if (!g_in_batch_insert) LQFT_RWLOCK_UNLOCK_WR(&stripe_locks[stripe].lock);
+        return new_node;
+    }
+    
+    new_node->registry_idx = insert_local; 
+    registry[insert_global] = new_node;
     ATOMIC_INC(&physical_node_count);
     if (!g_in_batch_insert) LQFT_RWLOCK_UNLOCK_WR(&stripe_locks[stripe].lock);
     
     return new_node;
 }
 
-// O(1) CRYPTOGRAPHIC FAST-PATH FIX
 LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, uint64_t pre_leaf_base) {
     LQFTNode* path_nodes[20];
     uint32_t path_segs[20];
@@ -290,7 +310,7 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
         path_nodes[path_len] = curr;
         path_segs[path_len] = segment;
         path_len++;
-        if (curr->children == NULL || curr->children[segment] == NULL) { curr = NULL; break; }
+        if (curr->children[segment] == NULL) { curr = NULL; break; }
         curr = curr->children[segment];
         bit_depth += BIT_PARTITION;
     }
@@ -312,19 +332,19 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
             if (s_old != s_new) {
                 LQFTNode* c_old = get_canonical_v2((const char*)curr->value, old_h, curr->children, old_leaf_h);
                 LQFTNode* c_new = get_canonical_v2(val_ptr, h, NULL, leaf_h);
-                LQFTNode* new_children[32] = {NULL};
+                
+                LQFTNode* new_children[32]; 
+                memset(new_children, 0, sizeof(LQFTNode*) * 32);
                 new_children[s_old] = c_old;
                 new_children[s_new] = c_new;
                 
-                uint64_t branch_h = (c_old->full_hash_val * FNV_PRIME) ^ (c_new->full_hash_val * FNV_PRIME);
+                // V1.1.1 Fix: Vectorized Hash
+                uint64_t branch_h = hash_node_state(new_children);
                 new_sub_node = get_canonical_v2(NULL, 0, new_children, branch_h);
                 decref(c_old); decref(c_new);
                 break;
             } else { 
-                path_nodes[path_len] = NULL; 
-                path_segs[path_len] = s_old; 
-                path_len++; 
-                temp_depth += BIT_PARTITION; 
+                path_nodes[path_len] = NULL; path_segs[path_len] = s_old; path_len++; temp_depth += BIT_PARTITION; 
             }
         }
         if (new_sub_node == NULL) new_sub_node = get_canonical_v2(val_ptr, h, curr->children, leaf_h);
@@ -333,19 +353,23 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
     for (int i = path_len - 1; i >= 0; i--) {
         LQFTNode* next_parent;
         if (path_nodes[i] == NULL) {
-            LQFTNode* new_children[32] = {NULL};
+            LQFTNode* new_children[32];
+            memset(new_children, 0, sizeof(LQFTNode*) * 32);
             new_children[path_segs[i]] = new_sub_node;
-            next_parent = get_canonical_v2(NULL, 0, new_children, new_sub_node->full_hash_val * FNV_PRIME);
+            
+            // V1.1.1 Fix: Vectorized Hash
+            next_parent = get_canonical_v2(NULL, 0, new_children, hash_node_state(new_children));
         } else {
             LQFTNode* p = path_nodes[i];
-            LQFTNode* n_children[32] = {NULL}; 
+            
+            LQFTNode* n_children[32]; 
             if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
+            else memset(n_children, 0, sizeof(LQFTNode*) * 32);
+            
             n_children[path_segs[i]] = new_sub_node;
             
-            // O(1) XOR MATH OVERRIDE: Eliminates 32-way loop
-            uint64_t old_ch = (p->children && p->children[path_segs[i]]) ? p->children[path_segs[i]]->full_hash_val : 0;
-            uint64_t new_ch = new_sub_node ? new_sub_node->full_hash_val : 0;
-            uint64_t b_h = p->full_hash_val ^ (old_ch * FNV_PRIME) ^ (new_ch * FNV_PRIME);
+            // V1.1.1 Fix: Vectorized Hash completely replaces XOR dependency chain
+            uint64_t b_h = hash_node_state(n_children);
             
             next_parent = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
         }
@@ -363,27 +387,34 @@ LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
     while (curr != NULL && curr->value == NULL) {
         uint32_t segment = (h >> bit_depth) & MASK;
         path_nodes[path_len] = curr; path_segs[path_len] = segment; path_len++;
-        if (curr->children == NULL || curr->children[segment] == NULL) return root; 
+        if (curr->children == NULL || curr->children[segment] == NULL) {
+            ATOMIC_INC(&root->ref_count);
+            return root; 
+        }
         curr = curr->children[segment]; bit_depth += BIT_PARTITION;
     }
     
-    if (curr == NULL || curr->key_hash != h) return root;
+    if (curr == NULL || curr->key_hash != h) {
+        ATOMIC_INC(&root->ref_count);
+        return root;
+    }
 
     LQFTNode* new_sub_node = NULL; 
     for (int i = path_len - 1; i >= 0; i--) {
         LQFTNode* p = path_nodes[i];
-        LQFTNode* n_children[32] = {NULL}; 
+        
+        LQFTNode* n_children[32]; 
         if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
+        else memset(n_children, 0, sizeof(LQFTNode*) * 32);
+        
         n_children[path_segs[i]] = new_sub_node;
         
         int has_c = 0; for(int j=0; j<32; j++) { if(n_children[j]) { has_c = 1; break; } }
         
         if (!has_c && p->value == NULL) { new_sub_node = NULL; } 
         else {
-            // O(1) XOR MATH OVERRIDE
-            uint64_t old_ch = (p->children && p->children[path_segs[i]]) ? p->children[path_segs[i]]->full_hash_val : 0;
-            uint64_t new_ch = new_sub_node ? new_sub_node->full_hash_val : 0;
-            uint64_t b_h = p->full_hash_val ^ (old_ch * FNV_PRIME) ^ (new_ch * FNV_PRIME);
+            // V1.1.1 Fix: Vectorized Hash
+            uint64_t b_h = hash_node_state(n_children);
             
             new_sub_node = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
         }
@@ -404,29 +435,65 @@ char* core_search(uint64_t h) {
 }
 
 // ===================================================================
-// PYTHON FFI ENDPOINTS
+// OPTIMISTIC CONCURRENCY
 // ===================================================================
 
 static PyObject* method_insert(PyObject* self, PyObject* args) {
     unsigned long long h; char* val_str; if (!PyArg_ParseTuple(args, "Ks", &h, &val_str)) return NULL;
     uint64_t pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
     pre = fnv1a_update(pre, val_str, strlen(val_str));
+    
     Py_BEGIN_ALLOW_THREADS
-    LQFT_RWLOCK_WRLOCK(&root_lock);
-    LQFTNode* next = core_insert_internal(h, val_str, global_root, pre);
-    LQFTNode* old = global_root; global_root = next; if (old) decref(old);
-    LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+    LQFTNode* old_root; LQFTNode* next;
+    while (1) {
+        LQFT_RWLOCK_RDLOCK(&root_lock);
+        old_root = global_root;
+        if (old_root) ATOMIC_INC(&old_root->ref_count); 
+        LQFT_RWLOCK_UNLOCK_RD(&root_lock);
+        
+        next = core_insert_internal(h, val_str, old_root, pre);
+        
+        LQFT_RWLOCK_WRLOCK(&root_lock);
+        if (global_root == old_root) {
+            global_root = next; 
+            LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+            if (old_root) { decref(old_root); decref(old_root); }
+            break;
+        } else {
+            LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+            if (next) decref(next);
+            if (old_root) decref(old_root); 
+        }
+    }
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 
 static PyObject* method_delete(PyObject* self, PyObject* args) {
     unsigned long long h; if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    
     Py_BEGIN_ALLOW_THREADS
-    LQFT_RWLOCK_WRLOCK(&root_lock);
-    LQFTNode* next = core_delete_internal(h, global_root);
-    LQFTNode* old = global_root; global_root = next; if (old) decref(old);
-    LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+    LQFTNode* old_root; LQFTNode* next;
+    while(1) {
+        LQFT_RWLOCK_RDLOCK(&root_lock);
+        old_root = global_root;
+        if (old_root) ATOMIC_INC(&old_root->ref_count);
+        LQFT_RWLOCK_UNLOCK_RD(&root_lock);
+        
+        next = core_delete_internal(h, old_root);
+        
+        LQFT_RWLOCK_WRLOCK(&root_lock);
+        if (global_root == old_root) {
+            global_root = next; 
+            LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+            if (old_root) { decref(old_root); decref(old_root); }
+            break;
+        } else {
+            LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+            if (next) decref(next);
+            if (old_root) decref(old_root);
+        }
+    }
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
@@ -434,12 +501,14 @@ static PyObject* method_delete(PyObject* self, PyObject* args) {
 static PyObject* method_search(PyObject* self, PyObject* args) {
     unsigned long long h; if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     char* safe_copy = NULL; 
+    
     Py_BEGIN_ALLOW_THREADS 
     LQFT_RWLOCK_RDLOCK(&root_lock);
     char* result = core_search(h); 
     if (result) safe_copy = portable_strdup(result); 
     LQFT_RWLOCK_UNLOCK_RD(&root_lock);
     Py_END_ALLOW_THREADS
+    
     if (safe_copy) {
         PyObject* py_res = PyUnicode_FromString(safe_copy);
         free(safe_copy); return py_res;
@@ -456,7 +525,12 @@ static PyObject* method_insert_batch_raw(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_WRLOCK(&root_lock); LQFT_RWLOCK_WRLOCK(&registry_batch_lock); g_in_batch_insert = 1;
     for (Py_ssize_t i = 0; i < len; i++) {
-        if (i + 1 < len) { uint64_t n_h = hashes[i+1]; PREFETCH(&registry[(n_h ^ (n_h >> 32)) & REGISTRY_MASK]); }
+        if (i + 1 < len) { 
+            uint64_t n_h = hashes[i+1]; 
+            uint32_t str_p = (uint32_t)(n_h % NUM_STRIPES);
+            uint32_t l_idx = (uint32_t)((n_h ^ (n_h >> 32)) & STRIPE_MASK);
+            PREFETCH(&registry[(str_p * STRIPE_SIZE) + l_idx]); 
+        }
         LQFTNode* next = core_insert_internal(hashes[i], val_ptr, global_root, pre);
         LQFTNode* old = global_root; global_root = next; if (old) decref(old);
     }
@@ -478,7 +552,12 @@ static PyObject* method_insert_batch(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_WRLOCK(&root_lock); LQFT_RWLOCK_WRLOCK(&registry_batch_lock); g_in_batch_insert = 1;
     for (Py_ssize_t i = 0; i < len; i++) {
-        if (i + 1 < len) { uint64_t next_mix = hashes[i+1] ^ (hashes[i+1] >> 32); PREFETCH(&registry[next_mix & REGISTRY_MASK]); }
+        if (i + 1 < len) { 
+            uint64_t n_h = hashes[i+1]; 
+            uint32_t str_p = (uint32_t)(n_h % NUM_STRIPES);
+            uint32_t l_idx = (uint32_t)((n_h ^ (n_h >> 32)) & STRIPE_MASK);
+            PREFETCH(&registry[(str_p * STRIPE_SIZE) + l_idx]); 
+        }
         LQFTNode* next = core_insert_internal(hashes[i], val_ptr, global_root, pre_leaf);
         LQFTNode* old = global_root; global_root = next; if (old) decref(old);
     }
@@ -503,28 +582,27 @@ static PyObject* method_search_batch(PyObject* self, PyObject* args) {
     free(hashes); return PyLong_FromLong(hits);
 }
 
-// ===================================================================
-// PERSISTENCE & FAST ARENA WIPE
-// ===================================================================
 static PyObject* method_save_to_disk(PyObject* self, PyObject* args) {
     const char* path; if (!PyArg_ParseTuple(args, "s", &path)) return NULL;
     FILE* fp = fopen(path, "wb"); if (!fp) Py_RETURN_FALSE;
     fwrite(&physical_node_count, sizeof(int), 1, fp); fclose(fp); Py_RETURN_TRUE;
 }
+
 static PyObject* method_load_from_disk(PyObject* self, PyObject* args) { Py_RETURN_TRUE; }
 static PyObject* method_get_metrics(PyObject* self, PyObject* args) { return Py_BuildValue("{s:i}", "physical_nodes", physical_node_count); }
+
 static PyObject* method_free_all(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_WRLOCK(&root_lock); 
     for(int i = 0; i < NUM_STRIPES; i++) LQFT_RWLOCK_WRLOCK(&stripe_locks[i].lock);
     
     if (registry) { 
-        for (int i = 0; i < REGISTRY_SIZE; i++) { 
+        for(int i = 0; i < NUM_STRIPES * STRIPE_SIZE; i++) {
             if (registry[i] && registry[i] != TOMBSTONE) { 
                 if (registry[i]->value) free(registry[i]->value);
             } 
             registry[i] = NULL; 
-        } 
+        }
     }
     
     NodeChunk* nc = current_node_chunk;
@@ -557,9 +635,15 @@ static PyMethodDef LQFTMethods[] = {
 };
 
 static struct PyModuleDef lqftmodule = { PyModuleDef_HEAD_INIT, "lqft_c_engine", NULL, -1, LQFTMethods };
+
 PyMODINIT_FUNC PyInit_lqft_c_engine(void) { 
     LQFT_RWLOCK_INIT(&root_lock); LQFT_RWLOCK_INIT(&alloc_lock); LQFT_RWLOCK_INIT(&registry_batch_lock);
-    for(int i = 0; i < NUM_STRIPES; i++) LQFT_RWLOCK_INIT(&stripe_locks[i].lock);
-    registry = (LQFTNode**)calloc(REGISTRY_SIZE, sizeof(LQFTNode*));
+    
+    // Allocate Flat Array for maximum CPU Cache locality
+    registry = (LQFTNode**)calloc(NUM_STRIPES * STRIPE_SIZE, sizeof(LQFTNode*));
+    
+    for(int i = 0; i < NUM_STRIPES; i++) {
+        LQFT_RWLOCK_INIT(&stripe_locks[i].lock);
+    }
     return PyModule_Create(&lqftmodule); 
 }

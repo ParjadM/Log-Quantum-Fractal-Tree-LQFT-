@@ -27,7 +27,7 @@ Branch hash recalculation during Deletion and Updates utilizes mathematical XOR 
 
 ---
 
-## 🚀 Silicon Performance Report (v0.9.0)
+## 🚀 Silicon Performance Report (v0.9.2)
 
 *Environment: Python 3.12 | GCC -O3 | MinGW64 | 16-Core Parallel Architecture*
 

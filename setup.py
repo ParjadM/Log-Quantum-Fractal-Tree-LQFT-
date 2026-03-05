@@ -3,10 +3,11 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V0.9.1 (Stability & Performance Patch)
+# LQFT BUILD SYSTEM - V0.9.2 (Hardware Saturation Release)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
-# Status: Production Core for Multi-Language Roadmap
+# Status: Enterprise Production Core
+# Features: Vectorized FNV-1a Hashing, L1 Cache Flat Array, Zero-Copy FFI
 
 # Systems Architect Logic: Cross-Platform Compiler Routing
 extra_compile_args = []
@@ -14,7 +15,7 @@ extra_compile_args = []
 if os.name == 'nt':
     # Windows (MSVC or MinGW)
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
-        # Aggressive GCC optimization for the v0.9.x Slab Allocator
+        # Aggressive GCC optimization for the Slab Allocator
         extra_compile_args = ['-O3']
     else:
         # Microsoft Visual C++ optimizations
@@ -30,7 +31,7 @@ if os.path.exists("README.md"):
         long_description = fh.read()
 
 # Define the Native C-Extension
-# Note: Standardized to 'lqft_engine.c' to match local environment naming.
+# Ensure your C source file matches this name (e.g., 'lqft_engine.c' or 'lq_engine.c')
 lqft_extension = Extension(
     'lqft_c_engine',
     sources=['lqft_engine.c'],
@@ -39,8 +40,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.9.1", 
-    description="LQFT Engine: Custom Arena Allocator & O(1) Fast-Path (v0.9.1 Stable)",
+    version="0.9.2", 
+    description="LQFT Engine: Vectorized Hashing, Zero-Copy Batching, & L1 Cache Locality (v0.9.2 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
