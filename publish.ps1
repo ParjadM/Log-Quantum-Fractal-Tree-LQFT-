@@ -15,7 +15,7 @@ foreach ($file in $Extras) {
 }
 
 # 2. CLEAN CACHE
-$Artifacts = @("build", "dist", "lqft_python_engine.egg-info", "__pycache__")
+$Artifacts = @("build", "dist", "lqft_python_engine.egg-info", "__pycache__", "wheelhouse")
 foreach ($folder in $Artifacts) {
     if (Test-Path $folder) { Remove-Item -Recurse -Force $folder }
 }
@@ -29,7 +29,7 @@ $Version | Out-File -FilePath "version.txt" -Encoding utf8
 # 4. GITHUB SYNC
 Write-Host "[*] Staging $Version production source..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Gold Master 14.3M Ops/sec Architecture"
+git commit -m "release: $Version - CI/CD Pipeline Hotfix (cibuildwheel & graceful FFI)"
 git push origin main
 
 # 5. FRESH TAGGING (Bypasses GitHub webhook bugs)
