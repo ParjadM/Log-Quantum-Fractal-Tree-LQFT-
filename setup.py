@@ -2,20 +2,25 @@ from setuptools import setup, find_packages, Extension
 import os
 import sys
 
-# Systems Architect Logic: Minimalist Compiler Routing
+# ---------------------------------------------------------
+# LQFT BUILD SYSTEM - V0.9.0 (Multi-Language Core Prep)
+# ---------------------------------------------------------
+# Architect: Parjad Minooei
+# Focus: Custom Memory Arena, O(1) Fast-Path, and High Density
+
+# Systems Architect Logic: Cross-Platform Compiler Routing
 extra_compile_args = []
 
 if os.name == 'nt':
     # Windows (MSVC or MinGW)
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
+        # Aggressive GCC optimization for the new Slab Allocator
         extra_compile_args = ['-O3']
     else:
+        # Microsoft Visual C++ optimizations
         extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
 else:
-    # macOS/Linux (GCC/Apple Clang): Absolute minimalist optimization.
-    # Python's C-API headers (Python.h) handle their own POSIX/Darwin 
-    # macros. Injecting manual C-standards or warning suppressions disrupts 
-    # cibuildwheel's universal cross-compilation pipeline.
+    # macOS/Linux: POSIX optimizations
     extra_compile_args = ['-O3']
 
 # Load README for PyPI long_description
@@ -24,6 +29,8 @@ if os.path.exists("README.md"):
     with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
 
+# Define the Native C-Extension
+# Note: Pointing to 'lqft_engine.c' containing the v1.0.6 Arena Allocator
 lqft_extension = Extension(
     'lqft_c_engine',
     sources=['lqft_engine.c'],
@@ -32,8 +39,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.8.7", 
-    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.7 Stable)",
+    version="0.9.0", 
+    description="LQFT Engine: Custom Memory Arena & O(1) Cryptographic Fast-Path (v0.9.0 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
@@ -44,12 +51,15 @@ setup(
     install_requires=['psutil'],
     license="MIT",
     classifiers=[
+        "Development Status :: 4 - Beta",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: C",
         "Operating System :: OS Independent",
         "Topic :: Software Development :: Libraries :: Python Modules",
+        "Topic :: Database :: Database Engines/Servers",
     ],
     python_requires='>=3.10',
 )

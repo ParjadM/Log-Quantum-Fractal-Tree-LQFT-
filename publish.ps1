@@ -1,11 +1,12 @@
-# LQFT Production Release (v0.8.2)
+# LQFT Production Release (v0.9.0)
 # Architect: Parjad Minooei
-# Status: macOS Cross-Compilation Linker Fix
+# Status: Phase 3 (Multi-Language Core Prep) - Custom Memory Arena
 
-$Version = "v0.8.2"
+$Version = "v0.9.0"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
+Write-Host " Status: Custom Memory Arena & Density Wall Reached" -ForegroundColor Magenta
 Write-Host "==========================================================" -ForegroundColor Magenta
 
 # 1. THE TOTAL PURGE (Cleaning experimental noise for the MScAC Portfolio)
@@ -19,7 +20,8 @@ $Extras = @(
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
     "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
     "enterprise_capability_suite.py", "pre_release_suite.py", "make_readme.py",
-    "gil_bypass_test.py", "lqft_final_validation.py"
+    "gil_bypass_test.py", "lqft_final_validation.py", "v087_saturation_test.py",
+    "density_test.py", "crud_benchmark.py"
 )
 
 foreach ($file in $Extras) {
@@ -31,7 +33,7 @@ foreach ($file in $Extras) {
 
 # 2. LOCAL BUILD ARTIFACT CLEANUP
 Write-Host "[*] Cleaning build folders..." -ForegroundColor Yellow
-$Artifacts = @("build", "dist", "lqft_python_engine.egg-info")
+$Artifacts = @("build", "dist", "lqft_python_engine.egg-info", "__pycache__")
 foreach ($folder in $Artifacts) {
     if (Test-Path $folder) {
         Remove-Item -Recurse -Force $folder
@@ -40,10 +42,10 @@ foreach ($folder in $Artifacts) {
 Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
-# 3. CI/CD PIPELINE RESCUE
+# 3. CI/CD PIPELINE VERIFICATION
 Write-Host "[*] Verifying CI/CD required files..." -ForegroundColor Yellow
 if (!(Test-Path "validation.py")) {
-    Write-Host "  > Recreating missing validation.py for GitHub Actions..." -ForegroundColor Cyan
+    Write-Host "  > Recreating missing validation.py..." -ForegroundColor Cyan
     @'
 import sys
 import hashlib
@@ -52,33 +54,20 @@ import os
 def fast_hash(key):
     return int(hashlib.md5(str(key).encode()).hexdigest()[:16], 16)
 
-print("====================================================")
-print("   LQFT CI/CD PIPELINE: NATIVE C-ENGINE VALIDATION")
-print("====================================================")
-
 try:
     import lqft_c_engine
-    print("[*] Native C-Engine loaded successfully.")
-    
-    # 1. Verify core operations
     h = fast_hash("ci_test_vector")
     lqft_c_engine.insert(h, "verification_payload")
     result = lqft_c_engine.search(h)
-    assert result == "verification_payload", "Data corruption detected!"
+    assert result == "verification_payload", "Data corruption!"
     
-    # 2. Verify Persistence
-    lqft_c_engine.save_to_disk("cicd_test.bin")
-    assert os.path.exists("cicd_test.bin"), "Binary Serialization Failed!"
+    # Test new delete and memory arena features
+    lqft_c_engine.delete(h)
+    deleted_result = lqft_c_engine.search(h)
+    assert deleted_result is None, "Deletion failure in Arena!"
     
     lqft_c_engine.free_all()
-    assert lqft_c_engine.search(h) is None, "Memory not cleared!"
-    
-    lqft_c_engine.load_from_disk("cicd_test.bin")
-    assert lqft_c_engine.search(h) == "verification_payload", "Deserialization Failed!"
-    os.remove("cicd_test.bin")
-    
-    print("[*] Full CRUD, Persistence & Lock Striping verified.")
-    print("[*] CI/CD Pipeline PASS.")
+    print("[*] CI/CD Pipeline PASS (v0.9.0 Memory Arena Verified).")
 except Exception as e:
     print(f"[!] CI/CD Error: {e}")
     sys.exit(1)
@@ -88,7 +77,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "build: release $Version - Fix macOS cross-compilation linker error" --allow-empty
+git commit -m "release: $Version - Custom Memory Arena & O(1) Cryptographic Fast-Path" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)

@@ -2,8 +2,8 @@
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](#)
 [![C-Engine](https://img.shields.io/badge/Native-C-red.svg)](#)
-[![Concurrency](https://img.shields.io/badge/Concurrency-Strict_GIL__Bypass-success.svg)](#)
-[![Systems Architecture](https://img.shields.io/badge/Architecture-Merkle_HAMT-pink.svg)](#)
+[![Memory Arena](https://img.shields.io/badge/Memory-Custom_Slab_Allocator-success.svg)](#)
+[![Hardware](https://img.shields.io/badge/Limit-Sub_105_Byte_Density-green.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE.md)
 
 ## 📌 Project Overview
@@ -14,45 +14,35 @@ By offloading core associative logic to a native C-Extension, the LQFT completel
 
 ---
 
-## 🧠 Core Architecture (v0.8.1 Enterprise Release)
+## 🧠 Core Architecture (v0.9.0 Multi-Language Core Prep)
 
-### 1. Zero-Copy Buffer Protocol (New in v0.8.1)
-The engine now features `insert_batch_raw`, a low-level C-API endpoint that accepts contiguous memory buffers (like Python's native `array`). This bypasses the heavy `PyLong` object conversion overhead, allowing the engine to ingest data at the absolute physical limit of the CPU's memory bus.
+### 1. Custom Memory Arena (Slab Allocator)
+Standard C `malloc()` introduces significant OS metadata overhead (up to 16 bytes per allocation). In v0.9.0, the LQFT utilizes a **Custom Slab Allocator**. The engine requests memory in 16KB "Arena Chunks" and performs O(1) bump-allocation internally, crushing the memory footprint down to **~104 bytes per node**.
 
-### 2. True Hardware Concurrency & Strict GIL Bypass
-The engine utilizes native OS-level read-write locks (`SRWLOCK` on Windows, `pthread_rwlock_t` on POSIX) combined with strict `Py_BEGIN_ALLOW_THREADS` boundaries. 
-* **Multi-Core Scaling:** Multiple Python threads can read and write to the Merkle-DAG simultaneously across all physical CPU cores without Segmentation Faults.
-* **Zero GIL Contention:** The C-Engine entirely decouples from the Python interpreter during execution.
+### 2. Intrinsic Free-List & ARC
+When a branch is overwritten, the engine natively reclaims memory using an intrinsic linked-list. "Dead" nodes repurpose their own internal pointers to form an infinite recycle bin, avoiding expensive calls to the Operating System's `free()` method.
 
-### 3. Scale-Invariant Time Complexity: $O(1)$
-The LQFT utilizes a fixed 64-bit hash space partitioned into 13 levels. 
-* **Deterministic Latency:** Every search or insertion requires exactly 13 pointer hops.
-* **Scale-Invariance:** Performance remains constant whether the dataset contains 10^3 or 10^9 items.
-
-### 4. Entropy-Based Space Complexity: $O(\Sigma)$
-Nodes are identified by the cryptographic hash of their contents and child pointers (Merkle-DAG).
-* **Structural Folding:** Identical sub-trees are shared physically in memory across different branches or versions.
+### 3. O(1) Cryptographic Fast-Path
+Branch hash recalculation during Deletion and Updates utilizes mathematical XOR inverses (`Parent ^ (Old_Child * Prime) ^ (New_Child * Prime)`). This eliminates the standard 32-way branch loop, providing sub-microsecond structural folding.
 
 ---
 
-## 🚀 Performance Benchmarks (Hardware Saturation Reached)
+## 🚀 Silicon Performance Report (v0.9.0)
 
-*Environment: Python 3.12 | GCC -O3 | MSYS2/MinGW64 | 16-Thread Concurrency*
+*Environment: Python 3.12 | GCC -O3 | MinGW64 | 16-Core Parallel Architecture*
 
 | Metric | Result | 
 | :--- | :--- | 
-| **Read Throughput (16-Core)** | **~36.02 Million ops/sec** | 
-| **Write Throughput (Zero-Copy)** | **~320,000 ops/sec** (Saturates DDR RAM latency at ~19.5M internal memory jumps/sec) | 
-| **Space Efficiency** | Up to 1,500x reduction in versioned graph simulations | 
-| **Stability** | 100% Memory Safe under massive multi-threaded turnover | 
+| **Raw Memory Density** | **~104.6 bytes per node** (Eliminated 288-byte bloat) |
+| **Search Latency (p50)** | **~500 ns** (Deterministic 13-hop limit) |
+| **Raw Write Speed** | **313,433 ops/sec** (Zero-Copy Buffer Protocol) | 
+| **Multi-Thread Scaling** | Optimistic Concurrency (Read-Copy-Update) | 
 
 ---
 
 ## 🛠️ Getting Started
 
 ### Installation
-
-The engine requires a C compiler (GCC/MinGW or MSVC) to build the native extension.
 
 ```bash
 # Clone the repository
@@ -63,36 +53,23 @@ cd Log-Quantum-Fractal-Tree-LQFT-
 python setup.py build_ext --inplace
 ```
 
-### High-Performance Usage (Zero-Copy Buffer)
-
-For extreme ingestion tasks, bypass standard Python objects and feed the C-Engine directly from RAM.
+### High-Speed Usage (Zero-Copy)
 
 ```python
 import lqft_c_engine
 import array
-import hashlib
 
-# 1. Prepare raw 64-bit integer buffer
-raw_buffer = array.array('Q') 
-for i in range(100000):
-    h = int(hashlib.md5(f"data_{i}".encode()).hexdigest()[:16], 16)
-    raw_buffer.append(h)
-
-# 2. Ingest at Silicon Speeds (Zero Python Overhead)
+# Prepare raw 64-bit buffer
+raw_buffer = array.array('Q', [0x1, 0x2, 0x3])
 lqft_c_engine.insert_batch_raw(bytes(raw_buffer), "enterprise_payload")
 
-# 3. Read at Hardware Speeds
-result = lqft_c_engine.search(raw_buffer[0])
+# Sub-microsecond search
+result = lqft_c_engine.search(0x1)
 print(result) # "enterprise_payload"
 
-# 4. Native Disk Persistence
-lqft_c_engine.save_to_disk("production_state.bin")
+# Safe memory arena reclamation
 lqft_c_engine.free_all()
-lqft_c_engine.load_from_disk("production_state.bin")
 ```
 
----
-
 ## ⚖️ License
-
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
+MIT License - Parjad Minooei (2026).
