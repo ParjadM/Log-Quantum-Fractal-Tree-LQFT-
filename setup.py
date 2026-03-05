@@ -3,7 +3,7 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V1.0.1 (Gold Master Architecture)
+# LQFT BUILD SYSTEM - V1.0.2 (Gold Master Architecture)
 # Architect: Parjad Minooei
 # ---------------------------------------------------------
 
@@ -32,8 +32,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="1.0.1", 
-    description="LQFT Engine: O(1) Time | O(Σ) Space Data Structure (v1.0.1 Stable)",
+    version="1.0.2", 
+    description="LQFT Engine: O(1) Time | O(Σ) Space Data Structure (v1.0.2 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",

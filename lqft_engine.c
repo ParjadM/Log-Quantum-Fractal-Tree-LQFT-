@@ -44,6 +44,12 @@
     #include <pthread.h>
     #include <sched.h>
     #include <sys/mman.h>
+    
+    // V1.0.2 FIX: macOS compatibility for eager page faulting
+    #ifndef MAP_POPULATE
+    #define MAP_POPULATE 0
+    #endif
+    
     #define ATOMIC_INC(ptr) __sync_add_and_fetch((ptr), 1)
     #define ATOMIC_DEC(ptr) __sync_sub_and_fetch((ptr), 1)
     #define PREFETCH(ptr) __builtin_prefetch((const void*)(ptr), 0, 3)
@@ -374,7 +380,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
     node->ref_count = 0;
     
     if (children_src) {
-        LQFTNode*** arr = NULL;
+        LQFTNode** arr = NULL;
 
         if (!local_arena.array_free_list) {
 #ifdef _MSC_VER
@@ -387,7 +393,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
 #else
             LQFTNode*** free_chain;
             do {
-                free_chain = array_pool.head;
+                free_chain = (LQFTNode***)array_pool.head;
                 if (!free_chain) break;
             } while (!__sync_bool_compare_and_swap(&array_pool.head, free_chain, NULL));
             local_arena.array_free_list = free_chain;
@@ -395,7 +401,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
         }
 
         if (local_arena.array_free_list) {
-            arr = local_arena.array_free_list;
+            arr = (LQFTNode**)local_arena.array_free_list;
             local_arena.array_free_list = (LQFTNode***)arr[0];
         } else {
             if (local_arena.child_chunk_idx >= ARENA_CHUNK_SIZE) {
@@ -429,10 +435,9 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
                 global_child_chunks = new_chunk;
                 fast_unlock(&global_chunk_lock.flag);
             }
-            // V1.0.7 FIX: Explictly cast 2D array pointer to prevent C4047 warning
-            arr = (LQFTNode***)local_arena.current_child_chunk->arrays[local_arena.child_chunk_idx++];
+            arr = local_arena.current_child_chunk->arrays[local_arena.child_chunk_idx++];
         }
-        node->children = (LQFTNode**)arr;
+        node->children = arr;
         memcpy(node->children, children_src, sizeof(LQFTNode*) * 32);
     } else {
         node->children = NULL; 
