@@ -3,11 +3,11 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V0.9.4 (Billion-Scale Stability Release)
+# LQFT BUILD SYSTEM - V0.9.5 (The Merkle Forest Release)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
 # Status: Production Hardened
-# Performance: 13.3M Search ops/s | 1B-Snapshot Memory Folding
+# Performance: 1.37M Ops/sec | Zero-Contention OCC | Hardware Spinlocks
 
 # Systems Architect Logic: Cross-Platform Compiler Routing
 extra_compile_args = []
@@ -15,10 +15,8 @@ extra_compile_args = []
 if os.name == 'nt':
     # Windows (MSVC or MinGW)
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
-        # Aggressive GCC optimization for the Slab Allocator
         extra_compile_args = ['-O3']
     else:
-        # Microsoft Visual C++ optimizations
         extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
 else:
     # macOS/Linux: POSIX optimizations
@@ -31,7 +29,6 @@ if os.path.exists("README.md"):
         long_description = fh.read()
 
 # Define the Native C-Extension
-# Source: lqft_engine.c contains the v0.9.3+ memory leak fixes and vectorized hashing
 lqft_extension = Extension(
     'lqft_c_engine',
     sources=['lqft_engine.c'],
@@ -40,8 +37,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.9.4", 
-    description="LQFT Engine: Billion-Scale Persistence & Vectorized 13M-Search (v0.9.4 Stable)",
+    version="0.9.5", 
+    description="LQFT Engine: 1.3M+ Ops/sec Merkle Forest & Hardware Spinlocks (v0.9.5 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
