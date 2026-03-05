@@ -1,15 +1,15 @@
-# LQFT Production Release (v1.0.0)
+# LQFT Production Release (v0.9.8)
 # Architect: Parjad Minooei
 # Target: McMaster B.Tech Portfolio
 
-$Version = "v1.0.0"
+$Version = "v0.9.8"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
 Write-Host "==========================================================" -ForegroundColor Magenta
 
 # 1. PURGE EXPERIMENTAL FILES
-# V1.0.0 FIX: Aggressively removing ALL legacy benchmarks that crash CI/CD
+# V0.9.8 FIX: Aggressively removing ALL legacy benchmarks that crash CI/CD
 $Extras = @(
     "test.py", "test1.py", "v096_concurrency_showdown.py", 
     "stress_test_10m.py", "consistency_audit.py", "validation.py", 
