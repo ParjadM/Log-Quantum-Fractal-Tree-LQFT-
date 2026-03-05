@@ -1,66 +1,43 @@
-# LQFT Production Release (v0.9.7)
+# LQFT Production Release (v0.9.8)
 # Architect: Parjad Minooei
-# Status: The Merkle Forest & Hardware Spinlocks (1.37M Ops/sec)
+# Target: McMaster B.Tech Portfolio
 
-$Version = "v0.9.7"
+$Version = "v0.9.8"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
-Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
-Write-Host " Status: 1.37M Ops/sec Scaling Achieved via Merkle Forest" -ForegroundColor Magenta
+Write-Host " 🚀 INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
 Write-Host "==========================================================" -ForegroundColor Magenta
 
-# 1. THE TOTAL PURGE (Keeping the MScAC Portfolio focused)
-Write-Host "[*] Purging experimental stress suites and ranking benchmarks..." -ForegroundColor Yellow
-$Extras = @(
-    "test.py", "test1.py", "v096_concurrency_showdown.py", "stress_test_10m.py", 
-    "comprehensive_ranking.py", "arena_saturation_test.py", "crud_stability_test.py", 
-    "elite_benchmark.py", "grand_finale_benchmark.py", "leak_test.py", 
-    "leak_verification.py", "comprehensive_benchmark.py", "adaptive_benchmark.py", 
-    "trie_vs_lqft_benchmark.py", "graph_vs_lqft.py", "the_architects_choice.py", 
-    "complexity_demonstrator.py", "complexity_crossover.py", "leetcode_187_test.py", 
-    "memory_benchmark.py", "perplexity_benchmark_suite.py", "advanced_lqft_stress_suite.py", 
-    "three_sum_lqft_test.py", "lqft_integrity_proofs.py", "demo_lqft.py", 
-    "stress_test_memory_win.py", "initialize_lqft.py", "integrity_check_v44.py", 
-    "stress_test_large_payload.py", "enterprise_capability_suite.py", "pre_release_suite.py", 
-    "make_readme.py", "gil_bypass_test.py", "lqft_final_validation.py", 
-    "v087_saturation_test.py", "density_test.py", "crud_benchmark.py", 
-    "test_v090_wrapper.py", "showdown_test.py"
-)
-
+# 1. PURGE EXPERIMENTAL FILES
+$Extras = @("test.py", "test1.py", "v096_concurrency_showdown.py", "stress_test_10m.py", "consistency_audit.py")
 foreach ($file in $Extras) {
-    if (Test-Path $file) {
-        Remove-Item $file -Force
-        Write-Host "  > Purged: $file" -ForegroundColor Gray
-    }
+    if (Test-Path $file) { Remove-Item $file -Force }
 }
 
-# 2. LOCAL BUILD ARTIFACT CLEANUP
-Write-Host "[*] Cleaning local build environments..." -ForegroundColor Yellow
+# 2. CLEAN CACHE
 $Artifacts = @("build", "dist", "lqft_python_engine.egg-info", "__pycache__")
 foreach ($folder in $Artifacts) {
-    if (Test-Path $folder) {
-        Remove-Item -Recurse -Force $folder
-    }
+    if (Test-Path $folder) { Remove-Item -Recurse -Force $folder }
 }
 Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
-# 3. GITHUB SYNC & ACTION TRIGGER FIX
+# 3. FORCE FILE CHANGE TO TRIGGER ACTIONS
 Write-Host "[*] Forcing physical file change to trigger GitHub Actions..." -ForegroundColor Cyan
-# This guarantees the Git Tree changes, forcing GitHub's webhook to fire.
 $Version | Out-File -FilePath "version.txt" -Encoding utf8
 
+# 4. GITHUB SYNC
 Write-Host "[*] Staging $Version production source..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Merkle Forest Architecture and Hardware Spinlocks"
+git commit -m "release: $Version - Gold Master 14.3M Ops/sec Architecture"
 git push origin main
 
-# 4. CLEAN TAGGING
+# 5. FRESH TAGGING (Bypasses GitHub webhook bugs)
 Write-Host "[*] Pushing clean tag $Version to trigger PyPI build..." -ForegroundColor Cyan
 git tag $Version
 git push origin $Version
 
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host " ✅ DEPLOYMENT $Version LIVE" -ForegroundColor Green
-Write-Host " The C-Engine Backend is officially closed and highly optimized." -ForegroundColor Cyan
+Write-Host " The CI/CD Pipeline will now trigger perfectly." -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Green

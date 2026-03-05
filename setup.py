@@ -3,26 +3,21 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V0.9.7 (The Merkle Forest Release)
-# ---------------------------------------------------------
+# LQFT BUILD SYSTEM - V0.9.8 (Gold Master Architecture)
 # Architect: Parjad Minooei
-# Status: Production Hardened
-# Performance: 1.37M Ops/sec | Zero-Contention OCC | Hardware Spinlocks
+# ---------------------------------------------------------
 
-# Systems Architect Logic: Cross-Platform Compiler Routing
+# Aggressive hardware optimizations based on platform
 extra_compile_args = []
-
 if os.name == 'nt':
-    # Windows (MSVC or MinGW)
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
-        extra_compile_args = ['-O3']
+        extra_compile_args = ['-O3', '-march=native']
     else:
-        extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
+        extra_compile_args = ['/O2', '/GL', '/D_CRT_SECURE_NO_WARNINGS']
 else:
-    # macOS/Linux: POSIX optimizations
-    extra_compile_args = ['-O3']
+    # POSIX / Linux / macOS
+    extra_compile_args = ['-O3', '-march=native']
 
-# Load README for PyPI long_description
 long_description = "Log-Quantum Fractal Tree Engine"
 if os.path.exists("README.md"):
     with open("README.md", "r", encoding="utf-8") as fh:
@@ -37,8 +32,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.9.7", 
-    description="LQFT Engine: 1.3M+ Ops/sec Merkle Forest & Hardware Spinlocks (v0.9.5 Stable)",
+    version="0.9.8", 
+    description="LQFT Engine: O(1) Time | O(Σ) Space Data Structure (v0.9.8 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
@@ -51,12 +46,8 @@ setup(
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
         "Programming Language :: C",
         "Operating System :: OS Independent",
-        "Topic :: Software Development :: Libraries :: Python Modules",
         "Topic :: Database :: Database Engines/Servers",
     ],
     python_requires='>=3.10',

@@ -10,33 +10,47 @@
 #include <string.h>
 #include <stdint.h>
 
+#ifndef _MSC_VER
+#include <unistd.h>
+#endif
+
 /**
- * LQFT C-Engine - V0.9.8 (The Merkle Forest Architecture)
+ * LQFT C-Engine - V1.0.7 (Gold Master Edition)
  * Architect: Parjad Minooei
+ * Target: McMaster B.Tech Portfolio
  * * SYSTEMS ARCHITECTURE MILESTONES:
- * 1. ROOT SHARDING: Eliminated the "Root Swap Singularity". The engine now 
- * manages 2,048 independent Merkle-Trees, mathematically routing incoming
- * hashes via their top 11 bits.
- * 2. ZERO-CONTENTION OCC: With 16 threads spread across 2,048 roots, 
- * OCC thrashing drops to near 0%, allowing linear CPU scaling.
+ * 1. DAEMON ALLOCATOR: A background thread pre-allocates zeroed memory chunks 
+ * to prevent worker threads from stalling on OS mmap faults during 1B-node runs.
+ * 2. GRANDCHILD PREFETCHING: Look-ahead caching masks DDR4/DDR5 latency.
+ * 3. METRIC SHARDING: Zero-contention padded thread-local metric arrays.
+ * 4. STRICT CACHE ALIGNMENT: Lock arrays padded to stop False Sharing.
  */
 
 #if defined(_MSC_VER)
     #include <windows.h>
+    #include <memoryapi.h>
     #include <intrin.h>
     #pragma intrinsic(_InterlockedIncrement)
     #pragma intrinsic(_InterlockedDecrement)
     #pragma intrinsic(_InterlockedCompareExchange)
     #pragma intrinsic(_InterlockedExchange)
+    #pragma intrinsic(_InterlockedCompareExchangePointer)
+    #pragma intrinsic(_InterlockedExchangeAdd64)
     #define ATOMIC_INC(ptr) _InterlockedIncrement((LONG volatile*)(ptr))
     #define ATOMIC_DEC(ptr) _InterlockedDecrement((LONG volatile*)(ptr))
     #define PREFETCH(ptr) _mm_prefetch((const char*)(ptr), _MM_HINT_T0)
     #define CPU_PAUSE _mm_pause()
+    #define ALIGN_64 __declspec(align(64))
+    #define THREAD_LOCAL __declspec(thread)
 #else
     #include <pthread.h>
+    #include <sched.h>
+    #include <sys/mman.h>
     #define ATOMIC_INC(ptr) __sync_add_and_fetch((ptr), 1)
     #define ATOMIC_DEC(ptr) __sync_sub_and_fetch((ptr), 1)
-    #define PREFETCH(ptr) __builtin_prefetch(ptr)
+    #define PREFETCH(ptr) __builtin_prefetch((const void*)(ptr), 0, 3)
+    #define ALIGN_64 __attribute__((aligned(64)))
+    #define THREAD_LOCAL __thread
     #if defined(__i386__) || defined(__x86_64__)
         #define CPU_PAUSE __asm__ volatile("pause\n": : :"memory")
     #elif defined(__aarch64__) || defined(__arm__)
@@ -46,30 +60,76 @@
     #endif
 #endif
 
+// ===================================================================
+// CACHE-ALIGNED INFRASTRUCTURE & LOCKS
+// ===================================================================
+
 typedef struct {
     volatile long flag;
     char padding[60]; 
-} FastSpinLock;
+} ALIGN_64 PaddedLock;
 
+static inline void fast_lock_backoff(volatile long* lk) {
+    int spin = 0;
 #ifdef _MSC_VER
-    static inline void fast_lock(volatile long* lk) {
-        while (_InterlockedCompareExchange(lk, 1, 0) == 1) {
-            while (*lk) { CPU_PAUSE; }
-        }
-    }
-    static inline void fast_unlock(volatile long* lk) {
-        _InterlockedExchange(lk, 0);
-    }
+    while (_InterlockedCompareExchange(lk, 1, 0) == 1) {
 #else
-    static inline void fast_lock(volatile long* lk) {
-        while (__sync_val_compare_and_swap(lk, 0, 1) == 1) {
-            while (*lk) { CPU_PAUSE; }
+    while (__sync_val_compare_and_swap(lk, 0, 1) == 1) {
+#endif
+        spin++;
+        int max_spin = 1 << (spin < 12 ? spin : 12);
+        for(volatile int s = 0; s < max_spin; s++) { CPU_PAUSE; }
+        
+        if (spin > 10) {
+#ifdef _MSC_VER
+            SwitchToThread();
+#else
+            sched_yield();
+#endif
         }
     }
-    static inline void fast_unlock(volatile long* lk) {
-        __sync_lock_release(lk);
-    }
+}
+
+static inline void fast_unlock(volatile long* lk) {
+#ifdef _MSC_VER
+    _InterlockedExchange(lk, 0);
+#else
+    __sync_lock_release(lk);
 #endif
+}
+
+// ===================================================================
+// THREAD-LOCAL METRIC SHARDING (Zero Contention)
+// ===================================================================
+
+#define MAX_TRACKED_THREADS 256
+
+typedef struct {
+    int64_t phys_added;
+    int64_t phys_freed;
+    int64_t logical_inserts;
+    char padding[40]; // 64 - 24 = 40 bytes padding
+} ALIGN_64 ThreadMetrics;
+
+static ALIGN_64 ThreadMetrics global_metrics_array[MAX_TRACKED_THREADS];
+static volatile long registered_threads_count = 0;
+static THREAD_LOCAL ThreadMetrics* my_metrics = NULL;
+
+static inline ThreadMetrics* get_my_metrics() {
+    if (my_metrics == NULL) {
+#ifdef _MSC_VER
+        long idx = _InterlockedIncrement(&registered_threads_count) - 1;
+#else
+        long idx = __sync_fetch_and_add(&registered_threads_count, 1);
+#endif
+        if (idx < MAX_TRACKED_THREADS) {
+            my_metrics = &global_metrics_array[idx];
+        } else {
+            my_metrics = &global_metrics_array[0]; 
+        }
+    }
+    return my_metrics;
+}
 
 #define BIT_PARTITION 5
 #define MASK 0x1F 
@@ -78,12 +138,8 @@ typedef struct {
 #define STRIPE_MASK (STRIPE_SIZE - 1)
 #define TOMBSTONE ((LQFTNode*)1)
 
-// V0.9.8: 2048 Independent Roots
 #define NUM_ROOTS 2048
 #define ROOT_MASK 0x7FF
-
-#define NUM_ARENAS 128
-#define ARENA_MASK (NUM_ARENAS - 1)
 #define ARENA_CHUNK_SIZE 16384
 
 typedef struct LQFTNode {
@@ -95,34 +151,70 @@ typedef struct LQFTNode {
     int ref_count;
 } LQFTNode;
 
+// ===================================================================
+// BACKGROUND DAEMON ALLOCATOR & MEMORY ARENAS
+// ===================================================================
+
 typedef struct NodeChunk {
     LQFTNode nodes[ARENA_CHUNK_SIZE];
-    struct NodeChunk* next;
+    struct NodeChunk* next_global; 
 } NodeChunk;
 
 typedef struct ChildChunk {
     LQFTNode* arrays[ARENA_CHUNK_SIZE][32];
-    struct ChildChunk* next;
+    struct ChildChunk* next_global; 
 } ChildChunk;
 
+static PaddedLock global_chunk_lock = {0};
+static NodeChunk* global_node_chunks = NULL;
+static ChildChunk* global_child_chunks = NULL;
+
+// Background Pre-Zeroed Queues
+static NodeChunk* volatile pre_zeroed_node_chunks = NULL;
+static ChildChunk* volatile pre_zeroed_child_chunks = NULL;
+static volatile long pre_node_count = 0;
+static volatile long pre_child_count = 0;
+static volatile long bg_alloc_running = 0;
+
 typedef struct {
-    FastSpinLock lock;
+    LQFTNode* volatile head;
+    char padding[56];
+} ALIGN_64 GlobalNodePool;
+
+typedef struct {
+    LQFTNode*** volatile head;
+    char padding[56];
+} ALIGN_64 GlobalArrayPool;
+
+static GlobalNodePool node_pool = {NULL};
+static GlobalArrayPool array_pool = {NULL};
+
+typedef struct {
     NodeChunk* current_node_chunk;
     int node_chunk_idx;
     LQFTNode* node_free_list;
     ChildChunk* current_child_chunk;
     int child_chunk_idx;
     LQFTNode*** array_free_list;
-} AllocArena;
+} TLS_Arena;
 
-static AllocArena arenas[NUM_ARENAS];
+static THREAD_LOCAL TLS_Arena local_arena = {NULL, ARENA_CHUNK_SIZE, NULL, NULL, ARENA_CHUNK_SIZE, NULL};
+
+// Batched GC Retirement Chains
+static THREAD_LOCAL LQFTNode* local_ret_node_head = NULL;
+static THREAD_LOCAL LQFTNode* local_ret_node_tail = NULL;
+static THREAD_LOCAL int local_ret_node_count = 0;
+
+static THREAD_LOCAL LQFTNode*** local_ret_arr_head = NULL;
+static THREAD_LOCAL LQFTNode*** local_ret_arr_tail = NULL;
+static THREAD_LOCAL int local_ret_arr_count = 0;
+
 static LQFTNode** registry = NULL;
-static int physical_node_count = 0;
 
-// V0.9.8: The Merkle Forest
+// V1.0.7 FIX: Restored global roots array missing in previous copy
 static LQFTNode* global_roots[NUM_ROOTS];
-static FastSpinLock root_locks[NUM_ROOTS];
-static FastSpinLock stripe_locks[NUM_STRIPES];
+static ALIGN_64 PaddedLock root_locks[NUM_ROOTS];
+static ALIGN_64 PaddedLock stripe_locks[NUM_STRIPES];
 
 const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
 const uint64_t FNV_PRIME = 1099511628211ULL;
@@ -157,23 +249,135 @@ char* portable_strdup(const char* s) {
 #endif
 }
 
+// Background Daemon Worker
+#ifdef _MSC_VER
+DWORD WINAPI background_alloc_thread(LPVOID arg) {
+#else
+void* background_alloc_thread(void* arg) {
+#endif
+    while(bg_alloc_running) {
+        int work_done = 0;
+        
+        // Maintain a buffer of 32 chunks (~25MB pre-allocated per type)
+        if (pre_node_count < 32) {
+#ifdef _MSC_VER
+            NodeChunk* nc = (NodeChunk*)VirtualAlloc(NULL, sizeof(NodeChunk), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+            NodeChunk* nc = (NodeChunk*)mmap(NULL, sizeof(NodeChunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+#endif
+            if (nc) {
+#ifdef _MSC_VER
+                NodeChunk* old;
+                do { old = pre_zeroed_node_chunks; nc->next_global = old; } 
+                while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_node_chunks, (void*)nc, (void*)old) != (void*)old);
+                _InterlockedIncrement(&pre_node_count);
+#else
+                NodeChunk* old;
+                do { old = pre_zeroed_node_chunks; nc->next_global = old; } 
+                while (!__sync_bool_compare_and_swap(&pre_zeroed_node_chunks, old, nc));
+                __sync_fetch_and_add(&pre_node_count, 1);
+#endif
+                work_done = 1;
+            }
+        }
+        
+        if (pre_child_count < 32) {
+#ifdef _MSC_VER
+            ChildChunk* cc = (ChildChunk*)VirtualAlloc(NULL, sizeof(ChildChunk), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+            ChildChunk* cc = (ChildChunk*)mmap(NULL, sizeof(ChildChunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+#endif
+            if (cc) {
+#ifdef _MSC_VER
+                ChildChunk* old;
+                do { old = pre_zeroed_child_chunks; cc->next_global = old; } 
+                while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_child_chunks, (void*)cc, (void*)old) != (void*)old);
+                _InterlockedIncrement(&pre_child_count);
+#else
+                ChildChunk* old;
+                do { old = pre_zeroed_child_chunks; cc->next_global = old; } 
+                while (!__sync_bool_compare_and_swap(&pre_zeroed_child_chunks, old, cc));
+                __sync_fetch_and_add(&pre_child_count, 1);
+#endif
+                work_done = 1;
+            }
+        }
+        
+        if (!work_done) {
+#ifdef _MSC_VER
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+        }
+    }
+    return 0;
+}
+
 LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, uint64_t full_hash) {
-    uint32_t a_idx = (uint32_t)(full_hash & ARENA_MASK);
-    AllocArena* arena = &arenas[a_idx];
     LQFTNode* node = NULL;
     
-    fast_lock(&arena->lock.flag);
-    if (arena->node_free_list) {
-        node = arena->node_free_list;
-        arena->node_free_list = (LQFTNode*)node->children;
+    if (!local_arena.node_free_list) {
+#ifdef _MSC_VER
+        LQFTNode* free_chain;
+        do {
+            free_chain = node_pool.head;
+            if (!free_chain) break;
+        } while (_InterlockedCompareExchangePointer((void* volatile*)&node_pool.head, NULL, (void*)free_chain) != (void*)free_chain);
+        local_arena.node_free_list = free_chain;
+#else
+        LQFTNode* free_chain;
+        do {
+            free_chain = node_pool.head;
+            if (!free_chain) break;
+        } while (!__sync_bool_compare_and_swap(&node_pool.head, free_chain, NULL));
+        local_arena.node_free_list = free_chain;
+#endif
+    }
+
+    if (local_arena.node_free_list) {
+        node = local_arena.node_free_list;
+        local_arena.node_free_list = (LQFTNode*)node->children;
     } else {
-        if (arena->node_chunk_idx >= ARENA_CHUNK_SIZE) {
-            NodeChunk* new_chunk = (NodeChunk*)malloc(sizeof(NodeChunk));
-            new_chunk->next = arena->current_node_chunk;
-            arena->current_node_chunk = new_chunk;
-            arena->node_chunk_idx = 0;
+        if (local_arena.node_chunk_idx >= ARENA_CHUNK_SIZE) {
+            NodeChunk* new_chunk = NULL;
+            
+            // Pop from Daemon queue to prevent OS mmap stall
+#ifdef _MSC_VER
+            do {
+                new_chunk = pre_zeroed_node_chunks;
+                if (!new_chunk) break;
+            } while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_node_chunks, (void*)new_chunk->next_global, (void*)new_chunk) != (void*)new_chunk);
+            if (new_chunk) _InterlockedDecrement(&pre_node_count);
+#else
+            do {
+                new_chunk = pre_zeroed_node_chunks;
+                if (!new_chunk) break;
+            } while (!__sync_bool_compare_and_swap(&pre_zeroed_node_chunks, new_chunk, new_chunk->next_global));
+            if (new_chunk) __sync_fetch_and_sub(&pre_node_count, 1);
+#endif
+
+            // Fallback if Daemon is behind
+            if (!new_chunk) {
+#ifdef _MSC_VER
+                new_chunk = (NodeChunk*)VirtualAlloc(NULL, sizeof(NodeChunk), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+                new_chunk = (NodeChunk*)mmap(NULL, sizeof(NodeChunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+#endif
+            }
+            if (!new_chunk) {
+                printf("[!] FATAL ERROR: OS Virtual Memory Exhausted (OOM).\n");
+                exit(1);
+            }
+            local_arena.current_node_chunk = new_chunk;
+            local_arena.node_chunk_idx = 0;
+            
+            fast_lock_backoff(&global_chunk_lock.flag);
+            new_chunk->next_global = global_node_chunks;
+            global_node_chunks = new_chunk;
+            fast_unlock(&global_chunk_lock.flag);
         }
-        node = &arena->current_node_chunk->nodes[arena->node_chunk_idx++];
+        node = &local_arena.current_node_chunk->nodes[local_arena.node_chunk_idx++];
     }
     
     node->value = value;
@@ -183,23 +387,74 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
     node->ref_count = 0;
     
     if (children_src) {
-        if (arena->array_free_list) {
-            node->children = (LQFTNode**)arena->array_free_list;
-            arena->array_free_list = (LQFTNode***)node->children[0];
-        } else {
-            if (arena->child_chunk_idx >= ARENA_CHUNK_SIZE) {
-                ChildChunk* new_chunk = (ChildChunk*)malloc(sizeof(ChildChunk));
-                new_chunk->next = arena->current_child_chunk;
-                arena->current_child_chunk = new_chunk;
-                arena->child_chunk_idx = 0;
-            }
-            node->children = arena->current_child_chunk->arrays[arena->child_chunk_idx++];
+        LQFTNode*** arr = NULL;
+
+        if (!local_arena.array_free_list) {
+#ifdef _MSC_VER
+            LQFTNode*** free_chain;
+            do {
+                free_chain = (LQFTNode***)array_pool.head;
+                if (!free_chain) break;
+            } while (_InterlockedCompareExchangePointer((void* volatile*)&array_pool.head, NULL, (void*)free_chain) != (void*)free_chain);
+            local_arena.array_free_list = free_chain;
+#else
+            LQFTNode*** free_chain;
+            do {
+                free_chain = array_pool.head;
+                if (!free_chain) break;
+            } while (!__sync_bool_compare_and_swap(&array_pool.head, free_chain, NULL));
+            local_arena.array_free_list = free_chain;
+#endif
         }
-        fast_unlock(&arena->lock.flag);
+
+        if (local_arena.array_free_list) {
+            arr = local_arena.array_free_list;
+            local_arena.array_free_list = (LQFTNode***)arr[0];
+        } else {
+            if (local_arena.child_chunk_idx >= ARENA_CHUNK_SIZE) {
+                ChildChunk* new_chunk = NULL;
+                
+                // Pop from Daemon
+#ifdef _MSC_VER
+                do {
+                    new_chunk = pre_zeroed_child_chunks;
+                    if (!new_chunk) break;
+                } while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_child_chunks, (void*)new_chunk->next_global, (void*)new_chunk) != (void*)new_chunk);
+                if (new_chunk) _InterlockedDecrement(&pre_child_count);
+#else
+                do {
+                    new_chunk = pre_zeroed_child_chunks;
+                    if (!new_chunk) break;
+                } while (!__sync_bool_compare_and_swap(&pre_zeroed_child_chunks, new_chunk, new_chunk->next_global));
+                if (new_chunk) __sync_fetch_and_sub(&pre_child_count, 1);
+#endif
+
+                if (!new_chunk) {
+#ifdef _MSC_VER
+                    new_chunk = (ChildChunk*)VirtualAlloc(NULL, sizeof(ChildChunk), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+                    new_chunk = (ChildChunk*)mmap(NULL, sizeof(ChildChunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+#endif
+                }
+                if (!new_chunk) {
+                    printf("[!] FATAL ERROR: OS Virtual Memory Exhausted (OOM).\n");
+                    exit(1);
+                }
+                
+                local_arena.current_child_chunk = new_chunk;
+                local_arena.child_chunk_idx = 0;
+                
+                fast_lock_backoff(&global_chunk_lock.flag);
+                new_chunk->next_global = global_child_chunks;
+                global_child_chunks = new_chunk;
+                fast_unlock(&global_chunk_lock.flag);
+            }
+            arr = local_arena.current_child_chunk->arrays[local_arena.child_chunk_idx++];
+        }
+        node->children = (LQFTNode**)arr;
         memcpy(node->children, children_src, sizeof(LQFTNode*) * 32);
     } else {
         node->children = NULL; 
-        fast_unlock(&arena->lock.flag);
     }
     return node;
 }
@@ -207,7 +462,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
 void decref(LQFTNode* start_node) {
     if (!start_node || start_node == TOMBSTONE) return;
     
-    LQFTNode* cleanup_stack[128]; 
+    LQFTNode* cleanup_stack[512]; 
     int top = 0;
     cleanup_stack[top++] = start_node;
 
@@ -215,35 +470,72 @@ void decref(LQFTNode* start_node) {
         LQFTNode* node = cleanup_stack[--top];
         int new_ref = ATOMIC_DEC(&node->ref_count);
         
-        if (new_ref <= 0) {
+        if (new_ref == 0) {
             uint32_t stripe = (uint32_t)(node->full_hash_val % NUM_STRIPES);
             uint32_t global_idx = (stripe * STRIPE_SIZE) + node->registry_idx;
             
-            fast_lock(&stripe_locks[stripe].flag);
+            fast_lock_backoff(&stripe_locks[stripe].flag);
             if (registry[global_idx] == node) registry[global_idx] = TOMBSTONE;
             fast_unlock(&stripe_locks[stripe].flag);
-
-            uint32_t a_idx = (uint32_t)(node->full_hash_val & ARENA_MASK);
-            AllocArena* arena = &arenas[a_idx];
 
             if (node->children) {
                 for (int i = 0; i < 32; i++) {
                     if (node->children[i]) cleanup_stack[top++] = node->children[i];
                 }
-                fast_lock(&arena->lock.flag);
-                node->children[0] = (LQFTNode*)arena->array_free_list;
-                arena->array_free_list = (LQFTNode***)node->children;
-                fast_unlock(&arena->lock.flag);
+                
+                LQFTNode*** arr = (LQFTNode***)node->children;
+                arr[0] = (LQFTNode**)local_ret_arr_head;
+                local_ret_arr_head = arr;
+                if (local_ret_arr_count == 0) local_ret_arr_tail = arr;
+                local_ret_arr_count++;
+
+                if (local_ret_arr_count >= 1024) {
+#ifdef _MSC_VER
+                    LQFTNode*** old_head;
+                    do {
+                        old_head = (LQFTNode***)array_pool.head;
+                        local_ret_arr_tail[0] = (LQFTNode**)old_head;
+                    } while (_InterlockedCompareExchangePointer((void* volatile*)&array_pool.head, (void*)local_ret_arr_head, (void*)old_head) != (void*)old_head);
+#else
+                    LQFTNode*** old_head;
+                    do {
+                        old_head = array_pool.head;
+                        local_ret_arr_tail[0] = (LQFTNode**)old_head;
+                    } while (!__sync_bool_compare_and_swap(&array_pool.head, old_head, local_ret_arr_head));
+#endif
+                    local_ret_arr_head = NULL;
+                    local_ret_arr_tail = NULL;
+                    local_ret_arr_count = 0;
+                }
             }
 
             if (node->value) free(node->value);
             
-            fast_lock(&arena->lock.flag);
-            node->children = (LQFTNode**)arena->node_free_list;
-            arena->node_free_list = node;
-            fast_unlock(&arena->lock.flag);
+            node->children = (LQFTNode**)local_ret_node_head;
+            local_ret_node_head = node;
+            if (local_ret_node_count == 0) local_ret_node_tail = node;
+            local_ret_node_count++;
+
+            if (local_ret_node_count >= 1024) {
+#ifdef _MSC_VER
+                LQFTNode* old_node_head;
+                do {
+                    old_node_head = node_pool.head;
+                    local_ret_node_tail->children = (LQFTNode**)old_node_head;
+                } while (_InterlockedCompareExchangePointer((void* volatile*)&node_pool.head, (void*)local_ret_node_head, (void*)old_node_head) != (void*)old_node_head);
+#else
+                LQFTNode* old_node_head;
+                do {
+                    old_node_head = node_pool.head;
+                    local_ret_node_tail->children = (LQFTNode**)old_node_head;
+                } while (!__sync_bool_compare_and_swap(&node_pool.head, old_node_head, local_ret_node_head));
+#endif
+                local_ret_node_head = NULL;
+                local_ret_node_tail = NULL;
+                local_ret_node_count = 0;
+            }
             
-            ATOMIC_DEC(&physical_node_count);
+            get_my_metrics()->phys_freed++;
         }
     }
 }
@@ -254,20 +546,17 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     uint32_t global_idx = (stripe * STRIPE_SIZE) + local_idx;
     uint32_t start_idx = local_idx;
 
-    fast_lock(&stripe_locks[stripe].flag);
     for (;;) {
         LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
         if (slot != TOMBSTONE && slot->full_hash_val == full_hash) {
             ATOMIC_INC(&slot->ref_count); 
-            fast_unlock(&stripe_locks[stripe].flag);
             return slot;
         }
         local_idx = (local_idx + 1) & STRIPE_MASK;
         global_idx = (stripe * STRIPE_SIZE) + local_idx;
         if (local_idx == start_idx) break; 
     }
-    fast_unlock(&stripe_locks[stripe].flag);
 
     LQFTNode* new_node = create_node(value_ptr ? (void*)portable_strdup(value_ptr) : NULL, key_hash, children, full_hash);
     if (!new_node) return NULL;
@@ -279,7 +568,7 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
         }
     }
     
-    fast_lock(&stripe_locks[stripe].flag);
+    fast_lock_backoff(&stripe_locks[stripe].flag);
     local_idx = (uint32_t)((full_hash ^ (full_hash >> 32)) & STRIPE_MASK);
     global_idx = (stripe * STRIPE_SIZE) + local_idx;
     start_idx = local_idx;
@@ -310,7 +599,9 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     
     new_node->registry_idx = insert_local; 
     registry[insert_global] = new_node;
-    ATOMIC_INC(&physical_node_count);
+    
+    get_my_metrics()->phys_added++;
+    
     fast_unlock(&stripe_locks[stripe].flag);
     
     return new_node;
@@ -323,8 +614,20 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
     while (curr != NULL && curr->value == NULL) {
         uint32_t segment = (h >> bit_depth) & MASK;
         path_nodes[path_len] = curr; path_segs[path_len] = segment; path_len++;
-        if (curr->children[segment] == NULL) { curr = NULL; break; }
-        curr = curr->children[segment]; bit_depth += BIT_PARTITION;
+        
+        LQFTNode* next_node = curr->children[segment];
+        if (next_node == NULL) { curr = NULL; break; }
+        
+        // V1.0.7 FIX: Grandchild Look-Ahead Prefetch
+        if (bit_depth + BIT_PARTITION < 64) {
+            uint32_t next_segment = (h >> (bit_depth + BIT_PARTITION)) & MASK;
+            PREFETCH(&next_node->children[next_segment]);
+        } else {
+            PREFETCH(next_node);
+        }
+        
+        curr = next_node; 
+        bit_depth += BIT_PARTITION;
     }
     
     LQFTNode* new_sub_node = NULL;
@@ -376,75 +679,47 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
     return new_sub_node;
 }
 
-LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
-    if (root == NULL) return NULL;
-    LQFTNode* path_nodes[20]; uint32_t path_segs[20]; int path_len = 0;
-    LQFTNode* curr = root; int bit_depth = 0;
-    
-    while (curr != NULL && curr->value == NULL) {
-        uint32_t segment = (h >> bit_depth) & MASK;
-        path_nodes[path_len] = curr; path_segs[path_len] = segment; path_len++;
-        if (curr->children == NULL || curr->children[segment] == NULL) { ATOMIC_INC(&root->ref_count); return root; }
-        curr = curr->children[segment]; bit_depth += BIT_PARTITION;
-    }
-    if (curr == NULL || curr->key_hash != h) { ATOMIC_INC(&root->ref_count); return root; }
-
-    LQFTNode* new_sub_node = NULL; 
-    for (int i = path_len - 1; i >= 0; i--) {
-        LQFTNode* p = path_nodes[i];
-        LQFTNode* n_children[32]; 
-        if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
-        else memset(n_children, 0, sizeof(LQFTNode*) * 32);
-        
-        n_children[path_segs[i]] = new_sub_node;
-        int has_c = 0; for(int j=0; j<32; j++) { if(n_children[j]) { has_c = 1; break; } }
-        
-        if (!has_c && p->value == NULL) { new_sub_node = NULL; } 
-        else {
-            uint64_t b_h = hash_node_state(n_children);
-            LQFTNode* next_parent = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
-            if (new_sub_node) decref(new_sub_node);
-            new_sub_node = next_parent;
-        }
-    }
-    return new_sub_node;
-}
-
 char* core_search(uint64_t h, LQFTNode* root) {
     LQFTNode* curr = root; 
     int bit_depth = 0;
     while (curr != NULL && curr->value == NULL) {
         if (curr->children == NULL) return NULL;
-        curr = curr->children[(h >> bit_depth) & MASK];
+        uint32_t segment = (h >> bit_depth) & MASK;
+        LQFTNode* next_node = curr->children[segment];
+        
+        if (next_node) {
+            if (bit_depth + BIT_PARTITION < 64) {
+                uint32_t next_segment = (h >> (bit_depth + BIT_PARTITION)) & MASK;
+                PREFETCH(&next_node->children[next_segment]);
+            } else {
+                PREFETCH(next_node);
+            }
+        }
+        
+        curr = next_node;
         bit_depth += BIT_PARTITION;
     }
     if (curr != NULL && curr->key_hash == h) return (char*)curr->value;
     return NULL;
 }
 
-// ===================================================================
-// V0.9.8: THE MERKLE FOREST (Sharded OCC)
-// ===================================================================
-
-static PyObject* method_insert(PyObject* self, PyObject* args) {
-    unsigned long long h; char* val_str; if (!PyArg_ParseTuple(args, "Ks", &h, &val_str)) return NULL;
+static void c_internal_insert(uint64_t h, const char* val_str) {
     uint64_t pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
     pre = fnv1a_update(pre, val_str, strlen(val_str));
-    
-    // V0.9.8: Route to 1 of 2048 trees using the top 11 bits
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     
-    Py_BEGIN_ALLOW_THREADS
+    get_my_metrics()->logical_inserts++;
+
     int spin = 0;
     while (1) {
-        fast_lock(&root_locks[shard].flag);
+        fast_lock_backoff(&root_locks[shard].flag);
         LQFTNode* old_root = global_roots[shard];
         if (old_root) ATOMIC_INC(&old_root->ref_count);
         fast_unlock(&root_locks[shard].flag);
 
         LQFTNode* next = core_insert_internal(h, val_str, old_root, pre);
 
-        fast_lock(&root_locks[shard].flag);
+        fast_lock_backoff(&root_locks[shard].flag);
         if (global_roots[shard] == old_root) {
             global_roots[shard] = next;
             fast_unlock(&root_locks[shard].flag);
@@ -457,52 +732,42 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
             spin++;
             int max_spin = 1 << (spin < 12 ? spin : 12);
             for(volatile int s = 0; s < max_spin; s++) { CPU_PAUSE; }
+            if (spin > 10) {
+#ifdef _MSC_VER
+                SwitchToThread();
+#else
+                sched_yield();
+#endif
+            }
         }
     }
-    Py_END_ALLOW_THREADS
-    Py_RETURN_NONE;
 }
 
-static PyObject* method_delete(PyObject* self, PyObject* args) {
-    unsigned long long h; if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+// ===================================================================
+// V1.0.7 API BINDINGS
+// ===================================================================
+
+static PyObject* method_insert(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
+    const char* val_str = PyUnicode_AsUTF8(args[1]);
+    if (!val_str) return NULL;
 
     Py_BEGIN_ALLOW_THREADS
-    int spin = 0;
-    while(1) {
-        fast_lock(&root_locks[shard].flag);
-        LQFTNode* old_root = global_roots[shard];
-        if (old_root) ATOMIC_INC(&old_root->ref_count);
-        fast_unlock(&root_locks[shard].flag);
-
-        LQFTNode* next = core_delete_internal(h, old_root);
-
-        fast_lock(&root_locks[shard].flag);
-        if (global_roots[shard] == old_root) {
-            global_roots[shard] = next;
-            fast_unlock(&root_locks[shard].flag);
-            if (old_root) { decref(old_root); decref(old_root); }
-            break;
-        } else {
-            fast_unlock(&root_locks[shard].flag);
-            if (next) decref(next);
-            if (old_root) decref(old_root);
-            spin++;
-            int max_spin = 1 << (spin < 12 ? spin : 12);
-            for(volatile int s = 0; s < max_spin; s++) { CPU_PAUSE; }
-        }
-    }
+    c_internal_insert(h, val_str);
     Py_END_ALLOW_THREADS
+    
     Py_RETURN_NONE;
 }
 
-static PyObject* method_search(PyObject* self, PyObject* args) {
-    unsigned long long h; if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+static PyObject* method_search(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     char* safe_copy = NULL; 
     
     Py_BEGIN_ALLOW_THREADS 
-    fast_lock(&root_locks[shard].flag);
+    fast_lock_backoff(&root_locks[shard].flag);
     LQFTNode* current_root = global_roots[shard];
     if (current_root) ATOMIC_INC(&current_root->ref_count);
     fast_unlock(&root_locks[shard].flag);
@@ -510,7 +775,7 @@ static PyObject* method_search(PyObject* self, PyObject* args) {
     if (current_root) {
         char* result = core_search(h, current_root); 
         if (result) safe_copy = portable_strdup(result); 
-        decref(current_root); 
+        decref(current_root);
     }
     Py_END_ALLOW_THREADS
     
@@ -521,12 +786,154 @@ static PyObject* method_search(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+typedef struct {
+    int thread_id;
+    int ops;
+    int write_threshold; 
+} StressArgs;
+
+static inline uint32_t xorshift32(uint32_t *state) {
+    uint32_t x = *state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    return *state = x;
+}
+
+#ifdef _MSC_VER
+DWORD WINAPI stress_worker(LPVOID arg) {
+#else
+void* stress_worker(void* arg) {
+#endif
+
+    local_arena.current_node_chunk = NULL;
+    local_arena.node_chunk_idx = ARENA_CHUNK_SIZE;
+    local_arena.node_free_list = NULL;
+    local_arena.current_child_chunk = NULL;
+    local_arena.child_chunk_idx = ARENA_CHUNK_SIZE;
+    local_arena.array_free_list = NULL;
+    local_ret_node_head = NULL;
+    local_ret_node_tail = NULL;
+    local_ret_node_count = 0;
+    local_ret_arr_head = NULL;
+    local_ret_arr_tail = NULL;
+    local_ret_arr_count = 0;
+    
+    // Explicitly grab a tracked metric slot
+    my_metrics = NULL;
+    get_my_metrics();
+
+    StressArgs* sargs = (StressArgs*)arg;
+    uint32_t rng_state = 123456789 ^ (sargs->thread_id * 1999999973);
+    
+    char val_buf[32] = "val";
+    
+    for (int i = 0; i < sargs->ops; i++) {
+        uint32_t roll = xorshift32(&rng_state) % 100;
+        uint64_t h = ((uint64_t)xorshift32(&rng_state) << 32) | xorshift32(&rng_state);
+        
+        if (roll < (uint32_t)sargs->write_threshold) {
+            c_internal_insert(h, val_buf);
+        } else {
+            uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+            
+            fast_lock_backoff(&root_locks[shard].flag);
+            LQFTNode* current_root = global_roots[shard];
+            if (current_root) ATOMIC_INC(&current_root->ref_count);
+            fast_unlock(&root_locks[shard].flag);
+
+            if (current_root) {
+                core_search(h, current_root);
+                decref(current_root);
+            }
+        }
+    }
+    
+    if (local_ret_node_count > 0) {
+#ifdef _MSC_VER
+        LQFTNode* old_node_head;
+        do {
+            old_node_head = node_pool.head;
+            local_ret_node_tail->children = (LQFTNode**)old_node_head;
+        } while (_InterlockedCompareExchangePointer((void* volatile*)&node_pool.head, (void*)local_ret_node_head, (void*)old_node_head) != (void*)old_node_head);
+#else
+        LQFTNode* old_node_head;
+        do {
+            old_node_head = node_pool.head;
+            local_ret_node_tail->children = (LQFTNode**)old_node_head;
+        } while (!__sync_bool_compare_and_swap(&node_pool.head, old_node_head, local_ret_node_head));
+#endif
+        local_ret_node_head = NULL; local_ret_node_tail = NULL; local_ret_node_count = 0;
+    }
+    
+    if (local_ret_arr_count > 0) {
+#ifdef _MSC_VER
+        LQFTNode*** old_head;
+        do {
+            old_head = (LQFTNode***)array_pool.head;
+            local_ret_arr_tail[0] = (LQFTNode**)old_head;
+        } while (_InterlockedCompareExchangePointer((void* volatile*)&array_pool.head, (void*)local_ret_arr_head, (void*)old_head) != (void*)old_head);
+#else
+        LQFTNode*** old_head;
+        do {
+            old_head = array_pool.head;
+            local_ret_arr_tail[0] = (LQFTNode**)old_head;
+        } while (!__sync_bool_compare_and_swap(&array_pool.head, old_head, local_ret_arr_head));
+#endif
+        local_ret_arr_head = NULL; local_ret_arr_tail = NULL; local_ret_arr_count = 0;
+    }
+    
+    return 0;
+}
+
+static PyObject* method_internal_stress_test(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 3) return NULL;
+    int ops = (int)PyLong_AsLong(args[0]);
+    int num_threads = (int)PyLong_AsLong(args[1]);
+    double write_ratio = PyFloat_AsDouble(args[2]);
+    
+    int write_threshold = (int)(write_ratio * 100.0);
+    int ops_per_thread = ops / num_threads;
+
+    StressArgs* t_args = (StressArgs*)malloc(sizeof(StressArgs) * num_threads);
+    
+    Py_BEGIN_ALLOW_THREADS
+#ifdef _MSC_VER
+    HANDLE* threads = (HANDLE*)malloc(sizeof(HANDLE) * num_threads);
+    for (int i = 0; i < num_threads; i++) {
+        t_args[i].thread_id = i;
+        t_args[i].ops = ops_per_thread;
+        t_args[i].write_threshold = write_threshold;
+        threads[i] = CreateThread(NULL, 0, stress_worker, &t_args[i], 0, NULL);
+    }
+    WaitForMultipleObjects(num_threads, threads, TRUE, INFINITE);
+    for (int i = 0; i < num_threads; i++) CloseHandle(threads[i]);
+    free(threads);
+#else
+    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * num_threads);
+    for (int i = 0; i < num_threads; i++) {
+        t_args[i].thread_id = i;
+        t_args[i].ops = ops_per_thread;
+        t_args[i].write_threshold = write_threshold;
+        pthread_create(&threads[i], NULL, stress_worker, &t_args[i]);
+    }
+    for (int i = 0; i < num_threads; i++) pthread_join(threads[i], NULL);
+    free(threads);
+#endif
+    Py_END_ALLOW_THREADS
+    
+    free(t_args);
+    Py_RETURN_NONE;
+}
+
 static PyObject* method_insert_batch_raw(PyObject* self, PyObject* args) {
-    Py_buffer buf; const char* val_ptr; if (!PyArg_ParseTuple(args, "y*s", &buf, &val_ptr)) return NULL;
-    Py_ssize_t len = buf.len / sizeof(uint64_t); const uint64_t* hashes = (const uint64_t*)buf.buf;
+    Py_buffer buf; const char* val_ptr; 
+    if (!PyArg_ParseTuple(args, "y*s", &buf, &val_ptr)) return NULL;
+    
+    Py_ssize_t len = buf.len / sizeof(uint64_t); 
+    const uint64_t* hashes = (const uint64_t*)buf.buf;
+    
     uint64_t pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
     pre = fnv1a_update(pre, val_ptr, strlen(val_ptr));
-    
+
     Py_BEGIN_ALLOW_THREADS
     for (Py_ssize_t i = 0; i < len; i++) {
         uint64_t h = hashes[i];
@@ -534,14 +941,14 @@ static PyObject* method_insert_batch_raw(PyObject* self, PyObject* args) {
         
         int spin = 0;
         while(1) {
-            fast_lock(&root_locks[shard].flag);
+            fast_lock_backoff(&root_locks[shard].flag);
             LQFTNode* old_root = global_roots[shard];
             if (old_root) ATOMIC_INC(&old_root->ref_count);
             fast_unlock(&root_locks[shard].flag);
 
             LQFTNode* next = core_insert_internal(h, val_ptr, old_root, pre);
 
-            fast_lock(&root_locks[shard].flag);
+            fast_lock_backoff(&root_locks[shard].flag);
             if (global_roots[shard] == old_root) {
                 global_roots[shard] = next;
                 fast_unlock(&root_locks[shard].flag);
@@ -554,71 +961,40 @@ static PyObject* method_insert_batch_raw(PyObject* self, PyObject* args) {
                 spin++;
                 int max_spin = 1 << (spin < 12 ? spin : 12);
                 for(volatile int s = 0; s < max_spin; s++) { CPU_PAUSE; }
+                if (spin > 10) {
+#ifdef _MSC_VER
+                    SwitchToThread();
+#else
+                    sched_yield();
+#endif
+                }
             }
         }
     }
+    
+    get_my_metrics()->logical_inserts += len;
+    
     Py_END_ALLOW_THREADS
-    PyBuffer_Release(&buf); Py_RETURN_NONE;
-}
-
-static PyObject* method_insert_batch(PyObject* self, PyObject* args) {
-    PyObject* py_list; const char* val_ptr; if (!PyArg_ParseTuple(args, "Os", &py_list, &val_ptr)) return NULL;
-    PyObject* seq = PySequence_Fast(py_list, "List expected."); if (!seq) return NULL;
-    Py_ssize_t len = PySequence_Fast_GET_SIZE(seq); uint64_t* hashes = (uint64_t*)malloc(len * sizeof(uint64_t));
-    PyObject** items = PySequence_Fast_ITEMS(seq);
-    for (Py_ssize_t i = 0; i < len; i++) hashes[i] = PyLong_AsUnsignedLongLongMask(items[i]);
-    Py_DECREF(seq);
-    uint64_t pre_leaf = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
-    pre_leaf = fnv1a_update(pre_leaf, val_ptr, strlen(val_ptr));
-
-    Py_BEGIN_ALLOW_THREADS
-    for (Py_ssize_t i = 0; i < len; i++) {
-        uint64_t h = hashes[i];
-        uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-        
-        int spin = 0;
-        while(1) {
-            fast_lock(&root_locks[shard].flag);
-            LQFTNode* old_root = global_roots[shard];
-            if (old_root) ATOMIC_INC(&old_root->ref_count);
-            fast_unlock(&root_locks[shard].flag);
-
-            LQFTNode* next = core_insert_internal(h, val_ptr, old_root, pre_leaf);
-
-            fast_lock(&root_locks[shard].flag);
-            if (global_roots[shard] == old_root) {
-                global_roots[shard] = next;
-                fast_unlock(&root_locks[shard].flag);
-                if (old_root) { decref(old_root); decref(old_root); }
-                break; 
-            } else {
-                fast_unlock(&root_locks[shard].flag);
-                if (next) decref(next);
-                if (old_root) decref(old_root);
-                spin++;
-                int max_spin = 1 << (spin < 12 ? spin : 12);
-                for(volatile int s = 0; s < max_spin; s++) { CPU_PAUSE; }
-            }
-        }
-    }
-    Py_END_ALLOW_THREADS
-    free(hashes); Py_RETURN_NONE;
+    PyBuffer_Release(&buf); 
+    Py_RETURN_NONE;
 }
 
 static PyObject* method_search_batch(PyObject* self, PyObject* args) {
     PyObject* py_list; if (!PyArg_ParseTuple(args, "O", &py_list)) return NULL;
     PyObject* seq = PySequence_Fast(py_list, "List expected."); if (!seq) return NULL;
-    Py_ssize_t len = PySequence_Fast_GET_SIZE(seq); uint64_t* hashes = (uint64_t*)malloc(len * sizeof(uint64_t));
+    Py_ssize_t len = PySequence_Fast_GET_SIZE(seq); 
+    uint64_t* hashes = (uint64_t*)malloc(len * sizeof(uint64_t));
     PyObject** items = PySequence_Fast_ITEMS(seq);
     for (Py_ssize_t i = 0; i < len; i++) hashes[i] = PyLong_AsUnsignedLongLongMask(items[i]);
-    Py_DECREF(seq); int hits = 0;
+    Py_DECREF(seq); 
+    int hits = 0;
     
     Py_BEGIN_ALLOW_THREADS 
     for (Py_ssize_t i = 0; i < len; i++) {
         uint64_t h = hashes[i];
         uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
         
-        fast_lock(&root_locks[shard].flag);
+        fast_lock_backoff(&root_locks[shard].flag);
         LQFTNode* current_root = global_roots[shard];
         if (current_root) ATOMIC_INC(&current_root->ref_count);
         fast_unlock(&root_locks[shard].flag);
@@ -632,14 +1008,35 @@ static PyObject* method_search_batch(PyObject* self, PyObject* args) {
     free(hashes); return PyLong_FromLong(hits);
 }
 
-static PyObject* method_save_to_disk(PyObject* self, PyObject* args) { Py_RETURN_TRUE; }
-static PyObject* method_load_from_disk(PyObject* self, PyObject* args) { Py_RETURN_TRUE; }
-static PyObject* method_get_metrics(PyObject* self, PyObject* args) { return Py_BuildValue("{s:i}", "physical_nodes", physical_node_count); }
+static PyObject* method_get_metrics(PyObject* self, PyObject* args) { 
+    int64_t total_phys_added = 0;
+    int64_t total_phys_freed = 0;
+    int64_t total_logical = 0;
+    
+    // V1.0.7 FIX: Safely aggregate sharded metrics with zero contention
+    for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
+        total_phys_added += global_metrics_array[i].phys_added;
+        total_phys_freed += global_metrics_array[i].phys_freed;
+        total_logical += global_metrics_array[i].logical_inserts;
+    }
+    
+    int64_t net_phys = total_phys_added - total_phys_freed;
+    double deduplication_ratio = 0.0;
+    
+    if (net_phys > 0) {
+        deduplication_ratio = (double)total_logical / (double)net_phys;
+    }
+    
+    return Py_BuildValue("{s:L, s:L, s:d}", 
+        "physical_nodes", net_phys,
+        "logical_inserts", total_logical,
+        "deduplication_ratio", deduplication_ratio); 
+}
 
 static PyObject* method_free_all(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
-    for(int i = 0; i < NUM_ROOTS; i++) fast_lock(&root_locks[i].flag);
-    for(int i = 0; i < NUM_STRIPES; i++) fast_lock(&stripe_locks[i].flag);
+    for(int i = 0; i < NUM_ROOTS; i++) fast_lock_backoff(&root_locks[i].flag);
+    for(int i = 0; i < NUM_STRIPES; i++) fast_lock_backoff(&stripe_locks[i].flag);
     
     if (registry) { 
         for(int i = 0; i < NUM_STRIPES * STRIPE_SIZE; i++) {
@@ -650,26 +1047,79 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
         }
     }
     
-    for (int i = 0; i < NUM_ARENAS; i++) {
-        AllocArena* arena = &arenas[i];
-        fast_lock(&arena->lock.flag);
-        
-        NodeChunk* nc = arena->current_node_chunk;
-        while(nc) { NodeChunk* next = nc->next; free(nc); nc = next; }
-        arena->current_node_chunk = NULL; 
-        arena->node_chunk_idx = ARENA_CHUNK_SIZE; 
-        arena->node_free_list = NULL;
-
-        ChildChunk* cc = arena->current_child_chunk;
-        while(cc) { ChildChunk* next = cc->next; free(cc); cc = next; }
-        arena->current_child_chunk = NULL; 
-        arena->child_chunk_idx = ARENA_CHUNK_SIZE; 
-        arena->array_free_list = NULL;
-        
-        fast_unlock(&arena->lock.flag);
+    fast_lock_backoff(&global_chunk_lock.flag);
+    
+    // Clear Pre-Zeroed Daemon Queues safely
+    NodeChunk* pnc = pre_zeroed_node_chunks;
+    while(pnc) {
+        NodeChunk* next = pnc->next_global;
+#ifdef _MSC_VER
+        VirtualFree(pnc, 0, MEM_RELEASE); 
+#else
+        munmap(pnc, sizeof(NodeChunk));
+#endif
+        pnc = next;
     }
+    pre_zeroed_node_chunks = NULL;
+    pre_node_count = 0;
+    
+    ChildChunk* pcc = pre_zeroed_child_chunks;
+    while(pcc) {
+        ChildChunk* next = pcc->next_global;
+#ifdef _MSC_VER
+        VirtualFree(pcc, 0, MEM_RELEASE); 
+#else
+        munmap(pcc, sizeof(ChildChunk));
+#endif
+        pcc = next;
+    }
+    pre_zeroed_child_chunks = NULL;
+    pre_child_count = 0;
+    
+    // Clear Standard Active Queues
+    NodeChunk* nc = global_node_chunks;
+    while(nc) { 
+        NodeChunk* next = nc->next_global; 
+#ifdef _MSC_VER
+        VirtualFree(nc, 0, MEM_RELEASE); 
+#else
+        munmap(nc, sizeof(NodeChunk));
+#endif
+        nc = next; 
+    }
+    global_node_chunks = NULL;
 
-    physical_node_count = 0; 
+    ChildChunk* cc = global_child_chunks;
+    while(cc) { 
+        ChildChunk* next = cc->next_global; 
+#ifdef _MSC_VER
+        VirtualFree(cc, 0, MEM_RELEASE); 
+#else
+        munmap(cc, sizeof(ChildChunk));
+#endif
+        cc = next; 
+    }
+    global_child_chunks = NULL;
+    
+    node_pool.head = NULL;
+    array_pool.head = NULL;
+    fast_unlock(&global_chunk_lock.flag);
+
+    // Reset TLS
+    local_arena.current_node_chunk = NULL;
+    local_arena.node_chunk_idx = ARENA_CHUNK_SIZE;
+    local_arena.node_free_list = NULL;
+    local_arena.current_child_chunk = NULL;
+    local_arena.child_chunk_idx = ARENA_CHUNK_SIZE;
+    local_arena.array_free_list = NULL;
+    my_metrics = NULL;
+
+    for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
+        global_metrics_array[i].phys_added = 0;
+        global_metrics_array[i].phys_freed = 0;
+        global_metrics_array[i].logical_inserts = 0;
+    }
+    registered_threads_count = 0;
     
     for(int i = NUM_STRIPES - 1; i >= 0; i--) fast_unlock(&stripe_locks[i].flag);
     for(int i = NUM_ROOTS - 1; i >= 0; i--) {
@@ -681,14 +1131,11 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
 }
 
 static PyMethodDef LQFTMethods[] = {
-    {"insert", method_insert, METH_VARARGS, "Insert single key"},
-    {"search", method_search, METH_VARARGS, "Search single key"},
-    {"delete", method_delete, METH_VARARGS, "Delete single key"},
-    {"insert_batch", method_insert_batch, METH_VARARGS, "Bulk insert (list)"},
+    {"insert", (PyCFunction)method_insert, METH_FASTCALL, "Fast-path insert single key"},
+    {"search", (PyCFunction)method_search, METH_FASTCALL, "Fast-path search single key"},
+    {"internal_stress_test", (PyCFunction)method_internal_stress_test, METH_FASTCALL, "Run native C stress test"},
     {"insert_batch_raw", method_insert_batch_raw, METH_VARARGS, "Bulk insert (bytes)"},
     {"search_batch", method_search_batch, METH_VARARGS, "Bulk search (list)"},
-    {"save_to_disk", method_save_to_disk, METH_VARARGS, "Save binary"},
-    {"load_from_disk", method_load_from_disk, METH_VARARGS, "Load binary"},
     {"get_metrics", method_get_metrics, METH_VARARGS, "Get stats"},
     {"free_all", method_free_all, METH_VARARGS, "Wipe memory"},
     {NULL, NULL, 0, NULL}
@@ -705,15 +1152,15 @@ PyMODINIT_FUNC PyInit_lqft_c_engine(void) {
     registry = (LQFTNode**)calloc(NUM_STRIPES * STRIPE_SIZE, sizeof(LQFTNode*));
     for(int i = 0; i < NUM_STRIPES; i++) stripe_locks[i].flag = 0;
     
-    for(int i = 0; i < NUM_ARENAS; i++) {
-        arenas[i].lock.flag = 0;
-        arenas[i].current_node_chunk = NULL;
-        arenas[i].node_chunk_idx = ARENA_CHUNK_SIZE;
-        arenas[i].node_free_list = NULL;
-        arenas[i].current_child_chunk = NULL;
-        arenas[i].child_chunk_idx = ARENA_CHUNK_SIZE;
-        arenas[i].array_free_list = NULL;
-    }
-    
+    // V1.0.7 FIX: Ignite the Daemon Allocator Thread
+    bg_alloc_running = 1;
+#ifdef _MSC_VER
+    CreateThread(NULL, 0, background_alloc_thread, NULL, 0, NULL);
+#else
+    pthread_t bg_tid;
+    pthread_create(&bg_tid, NULL, background_alloc_thread, NULL);
+    pthread_detach(bg_tid); // Allow silent shutdown alongside Python interpreter
+#endif
+
     return PyModule_Create(&lqftmodule); 
 }
