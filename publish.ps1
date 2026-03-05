@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.9.6)
+# LQFT Production Release (v0.9.7)
 # Architect: Parjad Minooei
 # Status: The Merkle Forest & Hardware Spinlocks (1.37M Ops/sec)
 
-$Version = "v0.9.6"
+$Version = "v0.9.7"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -45,19 +45,20 @@ foreach ($folder in $Artifacts) {
 Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
-# 3. GITHUB SYNC
+# 3. GITHUB SYNC & ACTION TRIGGER FIX
+Write-Host "[*] Forcing physical file change to trigger GitHub Actions..." -ForegroundColor Cyan
+# This guarantees the Git Tree changes, forcing GitHub's webhook to fire.
+$Version | Out-File -FilePath "version.txt" -Encoding utf8
+
 Write-Host "[*] Staging $Version production source..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Merkle Forest Architecture and Hardware Spinlocks (1.37M Ops/sec)" --allow-empty
+git commit -m "release: $Version - Merkle Forest Architecture and Hardware Spinlocks"
 git push origin main
 
-# 4. TAGGING (Triggers GitHub Actions PyPI Build)
-Write-Host "[*] Updating production tag to $Version..." -ForegroundColor Cyan
-git tag -d $Version 2>$null
-git push origin :refs/tags/$Version 2>$null
-
+# 4. CLEAN TAGGING
+Write-Host "[*] Pushing clean tag $Version to trigger PyPI build..." -ForegroundColor Cyan
 git tag $Version
-git push origin --tags
+git push origin $Version
 
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host " ✅ DEPLOYMENT $Version LIVE" -ForegroundColor Green

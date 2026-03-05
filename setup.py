@@ -3,7 +3,7 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V0.9.5 (The Merkle Forest Release)
+# LQFT BUILD SYSTEM - V0.9.7 (The Merkle Forest Release)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
 # Status: Production Hardened
@@ -37,7 +37,7 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.9.5", 
+    version="0.9.7", 
     description="LQFT Engine: 1.3M+ Ops/sec Merkle Forest & Hardware Spinlocks (v0.9.5 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
