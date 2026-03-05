@@ -3,20 +3,28 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V1.0.2 (Gold Master Architecture)
+# LQFT BUILD SYSTEM - V1.0.3 (Apple Silicon M3 Hotfix)
 # Architect: Parjad Minooei
 # ---------------------------------------------------------
 
 # Aggressive hardware optimizations based on platform
 extra_compile_args = []
-if os.name == 'nt':
+
+if sys.platform == 'darwin':
+    # FIX: macOS cross-compilation on M1/M2/M3 runners crashes with -march=native
+    # because it tries to compile x86_64 wheels using Apple Silicon native instructions.
+    extra_compile_args = ['-O3']
+elif os.name == 'nt':
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
-        extra_compile_args = ['-O3', '-march=native']
+        extra_compile_args = ['-O3']
     else:
         extra_compile_args = ['/O2', '/GL', '/D_CRT_SECURE_NO_WARNINGS']
 else:
-    # POSIX / Linux / macOS
-    extra_compile_args = ['-O3', '-march=native']
+    # POSIX / Linux
+    if os.environ.get('CIBUILDWHEEL') == '1':
+        extra_compile_args = ['-O3'] 
+    else:
+        extra_compile_args = ['-O3', '-march=native']
 
 long_description = "Log-Quantum Fractal Tree Engine"
 if os.path.exists("README.md"):
@@ -32,8 +40,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="1.0.2", 
-    description="LQFT Engine: O(1) Time | O(Σ) Space Data Structure (v1.0.2 Stable)",
+    version="1.0.3", 
+    description="LQFT Engine: 14.3M Ops/sec O(1) Time | O(Σ) Space Data Structure",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
