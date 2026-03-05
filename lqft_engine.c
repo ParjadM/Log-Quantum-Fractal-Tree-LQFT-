@@ -868,15 +868,19 @@ void* stress_worker(void* arg) {
 
     StressArgs* sargs = (StressArgs*)arg;
 
+    // V1.0.1 FIX: macOS / Darwin compiler safety guards
 #ifdef _MSC_VER
     SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << (sargs->thread_id % 64));
-#else
+#elif defined(__linux__)
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cores <= 0) num_cores = 16;
     CPU_SET(sargs->thread_id % num_cores, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#else
+    // macOS / BSD fallback: Apple does not support pthread_setaffinity_np.
+    // We let the Darwin OS scheduler handle core distribution safely.
 #endif
 
     local_arena.current_node_chunk = NULL;
