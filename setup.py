@@ -2,7 +2,7 @@ from setuptools import setup, find_packages, Extension
 import os
 import sys
 
-# Systems Architect Logic: OS-Specific Compiler Routing
+# Systems Architect Logic: Minimalist Compiler Routing
 extra_compile_args = []
 
 if os.name == 'nt':
@@ -11,26 +11,12 @@ if os.name == 'nt':
         extra_compile_args = ['-O3']
     else:
         extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
-
-elif sys.platform == 'darwin':
-    # macOS (Apple Clang 15+): 
-    # Requires explicit POSIX definitions and warning-to-error downgrades.
-    extra_compile_args = [
-        '-O3', 
-        '-D_DARWIN_C_SOURCE',
-        '-D_POSIX_C_SOURCE=200809L',
-        '-Wno-error=implicit-function-declaration',
-        '-Wno-error=incompatible-function-pointer-types',
-        '-Wno-error=int-conversion'
-    ]
-
 else:
-    # Linux (GCC): 
-    # Standard POSIX enforcement without Clang-specific warning flags.
-    extra_compile_args = [
-        '-O3', 
-        '-D_POSIX_C_SOURCE=200809L'
-    ]
+    # macOS/Linux (GCC/Apple Clang): Absolute minimalist optimization.
+    # Python's C-API headers (Python.h) handle their own POSIX/Darwin 
+    # macros. Injecting manual C-standards or warning suppressions disrupts 
+    # cibuildwheel's universal cross-compilation pipeline.
+    extra_compile_args = ['-O3']
 
 # Load README for PyPI long_description
 long_description = "Log-Quantum Fractal Tree Engine"
@@ -46,8 +32,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.8.5", 
-    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.5 Stable)",
+    version="0.8.6", 
+    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.6 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
