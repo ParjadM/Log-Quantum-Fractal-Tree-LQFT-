@@ -3,24 +3,18 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.cibuildwheel]
-# Architect Fix: Target modern Python versions (3.10 - 3.12)
-# Python 3.8 lacks native Apple Silicon (ARM64) support, causing macOS runner failures.
 build = "cp310-* cp311-* cp312-*"
-
-# Skip 32-bit, PyPy, and musllinux for high-performance stability
 skip = "*-win32 *_i686 pp* *-musllinux_*"
 
-[tool.cibuildwheel.environment]
-# Set high-performance optimization flags for the C compiler
-CFLAGS="-O3 -Wall"
+# We removed the global CFLAGS environment variable here.
+# setup.py now handles the optimization flags so Apple's cross-compiler 
+# doesn't lose its `-arch x86_64` targeting flags.
 
 [tool.cibuildwheel.linux]
-# Manylinux is the industry standard for portable Linux binaries
 archs = ["x86_64"]
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
 
 [tool.cibuildwheel.macos]
-# Support both Intel and Apple Silicon (M1/M2/M3) for universal compatibility
 archs = ["x86_64", "arm64"]

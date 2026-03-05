@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.8.1)
+# LQFT Production Release (v0.8.2)
 # Architect: Parjad Minooei
-# Status: Apple Silicon CI/CD Fix & Modern Python Enforcement
+# Status: macOS Cross-Compilation Linker Fix
 
-$Version = "v0.8.1"
+$Version = "v0.8.2"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -88,7 +88,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "build: release $Version - CI/CD Apple Silicon fix & Python 3.10+ enforcement" --allow-empty
+git commit -m "build: release $Version - Fix macOS cross-compilation linker error" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)
