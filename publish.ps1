@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.9.5)
+# LQFT Production Release (v0.9.6)
 # Architect: Parjad Minooei
 # Status: The Merkle Forest & Hardware Spinlocks (1.37M Ops/sec)
 
-$Version = "v0.9.5"
+$Version = "v0.9.6"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -46,7 +46,7 @@ Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
 # 3. GITHUB SYNC
-Write-Host "[*] Staging v0.9.5 production source..." -ForegroundColor Cyan
+Write-Host "[*] Staging $Version production source..." -ForegroundColor Cyan
 git add .
 git commit -m "release: $Version - Merkle Forest Architecture and Hardware Spinlocks (1.37M Ops/sec)" --allow-empty
 git push origin main
