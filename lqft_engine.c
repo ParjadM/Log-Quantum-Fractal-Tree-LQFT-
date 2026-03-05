@@ -11,13 +11,14 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine - V1.0.2 (The Hardware-Synchronized Core)
+ * LQFT C-Engine - V0.8.7 (The Hardware-Synchronized Core)
  * Architect: Parjad Minooei
  * * SYSTEMS ARCHITECTURE MILESTONES:
- * 1. LEAF MEMOIZATION: Pre-hashes payloads once per batch to eliminate 1.6M redundant FNV cycles.
- * 2. ATOMIC BUS SUPPRESSION: Disables hardware memory barriers during batch transactions.
- * 3. LINEARIZED PROBING: Uses a high-entropy "Double-Mix" to minimize registry cluster collisions.
- * 4. FFI BYPASS: insert_batch_raw utilizes zero-copy memory mapping for sub-nanosecond access.
+ * 1. NEGATIVE ARRAY FIX: Uses static 128-byte padding to prevent macOS compilation crashes.
+ * 2. LEAF MEMOIZATION: Pre-hashes payloads once per batch to eliminate redundant FNV cycles.
+ * 3. ATOMIC BUS SUPPRESSION: Disables hardware memory barriers during batch transactions.
+ * 4. LINEARIZED PROBING: Uses a high-entropy "Double-Mix" to minimize registry cluster collisions.
+ * 5. FFI BYPASS: insert_batch_raw utilizes zero-copy memory mapping for sub-nanosecond access.
  */
 
 #ifdef _MSC_VER
@@ -56,7 +57,11 @@
 
 typedef struct {
     lqft_rwlock_t lock;
-    char padding[64 - sizeof(lqft_rwlock_t)];
+    // SYSTEMS FIX v0.8.7: macOS pthread_rwlock_t is 200 bytes!
+    // We use a static 128-byte pad to guarantee physical RAM separation
+    // across all OS architectures without risking negative array crashes 
+    // from (64 - sizeof(lock)).
+    char padding[128];
 } PaddedLock;
 
 typedef struct LQFTNode {
@@ -152,7 +157,7 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     uint64_t full_hash = manual_hash;
     uint32_t stripe = (uint32_t)(full_hash % NUM_STRIPES);
     
-    // v1.0.2 High-Entropy Mix for zero-latency indexing
+    // High-Entropy Mix for zero-latency indexing
     uint64_t mix = full_hash ^ (full_hash >> 32);
     uint32_t idx = (uint32_t)(mix & REGISTRY_MASK);
     uint32_t start_idx = idx;

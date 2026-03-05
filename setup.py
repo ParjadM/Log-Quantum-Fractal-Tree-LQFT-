@@ -32,8 +32,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.8.6", 
-    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.6 Stable)",
+    version="0.8.7", 
+    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.7 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
