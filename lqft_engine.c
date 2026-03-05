@@ -11,15 +11,15 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine - V1.0.6 (The Systems Allocator Build)
+ * LQFT C-Engine - V0.9.0 (High Density Memory Arena)
  * Architect: Parjad Minooei
  * * SYSTEMS ARCHITECTURE MILESTONES:
- * 1. SLAB ALLOCATOR (ARENA): Bypasses OS `malloc` overhead, saving ~16 bytes of hidden 
+ * 1. DYNAMIC DECOUPLING: Removed hardcoded children[32] from the struct. Leaves 
+ * now consume ~40 bytes instead of 288 bytes (an 86% memory reduction per item).
+ * 2. SLAB ALLOCATOR (ARENA): Bypasses OS `malloc` overhead, saving ~16 bytes of hidden 
  * metadata per node. Grabs memory in 16K chunks for O(1) bump-allocation.
- * 2. INTRINSIC FREE-LIST: Dead nodes repurpose their internal pointers to form an 
- * infinite, dynamically linked recycle bin without hitting OS `free()`.
  * 3. O(1) CRYPTOGRAPHIC FAST-PATH: Eliminated 32-way loops in branch hashing by using 
- * mathematical XOR inverses: (Hash ^ (Old * P) ^ (New * P)).
+ * mathematical XOR inverses.
  */
 
 #ifdef _MSC_VER
@@ -58,13 +58,14 @@
 
 typedef struct {
     lqft_rwlock_t lock;
-    char padding[128]; 
+    char padding[128]; // Cache-line isolation for macOS/Linux
 } PaddedLock;
 
+// v0.9.0 Memory Density Update: Decoupled pointer array
 typedef struct LQFTNode {
     void* value;
     uint64_t key_hash;
-    struct LQFTNode** children; 
+    struct LQFTNode** children; // NULL for leaves. 32-array allocated ONLY for branches.
     uint64_t full_hash_val;
     uint32_t registry_idx; 
     int ref_count;
@@ -88,7 +89,7 @@ typedef struct ChildChunk {
 
 static NodeChunk* current_node_chunk = NULL;
 static int node_chunk_idx = ARENA_CHUNK_SIZE;
-static LQFTNode* node_free_list = NULL; // Intrinsic linked list
+static LQFTNode* node_free_list = NULL;
 
 static ChildChunk* current_child_chunk = NULL;
 static int child_chunk_idx = ARENA_CHUNK_SIZE;
@@ -129,12 +130,10 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src) {
     LQFTNode* node = NULL;
     LQFT_RWLOCK_WRLOCK(&alloc_lock);
     
-    // 1. Check Intrinsic Free-List (O(1) Pop)
     if (node_free_list) {
         node = node_free_list;
         node_free_list = (LQFTNode*)node->children;
     } else {
-        // 2. Bump Allocation from Arena Chunk (O(1) Bump)
         if (node_chunk_idx >= ARENA_CHUNK_SIZE) {
             NodeChunk* new_chunk = (NodeChunk*)malloc(sizeof(NodeChunk));
             new_chunk->next = current_node_chunk;
@@ -166,7 +165,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src) {
         LQFT_RWLOCK_UNLOCK_WR(&alloc_lock);
         memcpy(node->children, children_src, sizeof(LQFTNode*) * 32);
     } else {
-        node->children = NULL; 
+        node->children = NULL; // 40-byte strict leaf
         LQFT_RWLOCK_UNLOCK_WR(&alloc_lock);
     }
     return node;
@@ -192,7 +191,6 @@ void decref(LQFTNode* start_node) {
                 for (int i = 0; i < 32; i++) {
                     if (node->children[i]) cleanup_stack[top++] = node->children[i];
                 }
-                // Send array to the free-list
                 LQFT_RWLOCK_WRLOCK(&alloc_lock);
                 node->children[0] = (LQFTNode*)array_free_list;
                 array_free_list = (LQFTNode***)node->children;
@@ -201,7 +199,6 @@ void decref(LQFTNode* start_node) {
 
             if (node->value) free(node->value);
             
-            // Send node to the intrinsic free-list
             LQFT_RWLOCK_WRLOCK(&alloc_lock);
             node->children = (LQFTNode**)node_free_list;
             node_free_list = node;
@@ -293,7 +290,7 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
         path_nodes[path_len] = curr;
         path_segs[path_len] = segment;
         path_len++;
-        if (curr->children[segment] == NULL) { curr = NULL; break; }
+        if (curr->children == NULL || curr->children[segment] == NULL) { curr = NULL; break; }
         curr = curr->children[segment];
         bit_depth += BIT_PARTITION;
     }
@@ -341,12 +338,12 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
             next_parent = get_canonical_v2(NULL, 0, new_children, new_sub_node->full_hash_val * FNV_PRIME);
         } else {
             LQFTNode* p = path_nodes[i];
-            LQFTNode* n_children[32]; 
-            memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
+            LQFTNode* n_children[32] = {NULL}; 
+            if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
             n_children[path_segs[i]] = new_sub_node;
             
             // O(1) XOR MATH OVERRIDE: Eliminates 32-way loop
-            uint64_t old_ch = p->children[path_segs[i]] ? p->children[path_segs[i]]->full_hash_val : 0;
+            uint64_t old_ch = (p->children && p->children[path_segs[i]]) ? p->children[path_segs[i]]->full_hash_val : 0;
             uint64_t new_ch = new_sub_node ? new_sub_node->full_hash_val : 0;
             uint64_t b_h = p->full_hash_val ^ (old_ch * FNV_PRIME) ^ (new_ch * FNV_PRIME);
             
@@ -366,7 +363,7 @@ LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
     while (curr != NULL && curr->value == NULL) {
         uint32_t segment = (h >> bit_depth) & MASK;
         path_nodes[path_len] = curr; path_segs[path_len] = segment; path_len++;
-        if (curr->children[segment] == NULL) return root; 
+        if (curr->children == NULL || curr->children[segment] == NULL) return root; 
         curr = curr->children[segment]; bit_depth += BIT_PARTITION;
     }
     
@@ -375,15 +372,16 @@ LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
     LQFTNode* new_sub_node = NULL; 
     for (int i = path_len - 1; i >= 0; i--) {
         LQFTNode* p = path_nodes[i];
-        LQFTNode* n_children[32]; memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
+        LQFTNode* n_children[32] = {NULL}; 
+        if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
         n_children[path_segs[i]] = new_sub_node;
         
         int has_c = 0; for(int j=0; j<32; j++) { if(n_children[j]) { has_c = 1; break; } }
         
         if (!has_c && p->value == NULL) { new_sub_node = NULL; } 
         else {
-            // O(1) XOR MATH OVERRIDE: Eliminates 32-way loop
-            uint64_t old_ch = p->children[path_segs[i]] ? p->children[path_segs[i]]->full_hash_val : 0;
+            // O(1) XOR MATH OVERRIDE
+            uint64_t old_ch = (p->children && p->children[path_segs[i]]) ? p->children[path_segs[i]]->full_hash_val : 0;
             uint64_t new_ch = new_sub_node ? new_sub_node->full_hash_val : 0;
             uint64_t b_h = p->full_hash_val ^ (old_ch * FNV_PRIME) ^ (new_ch * FNV_PRIME);
             
@@ -397,6 +395,7 @@ char* core_search(uint64_t h) {
     LQFTNode* curr = global_root; 
     int bit_depth = 0;
     while (curr != NULL && curr->value == NULL) {
+        if (curr->children == NULL) return NULL;
         curr = curr->children[(h >> bit_depth) & MASK];
         bit_depth += BIT_PARTITION;
     }
@@ -405,7 +404,7 @@ char* core_search(uint64_t h) {
 }
 
 // ===================================================================
-// OPTIMISTIC CONCURRENCY FFI ENDPOINTS
+// PYTHON FFI ENDPOINTS
 // ===================================================================
 
 static PyObject* method_insert(PyObject* self, PyObject* args) {
@@ -413,23 +412,10 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
     uint64_t pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
     pre = fnv1a_update(pre, val_str, strlen(val_str));
     Py_BEGIN_ALLOW_THREADS
-    LQFTNode* old_root; LQFTNode* next;
-    while (1) {
-        LQFT_RWLOCK_RDLOCK(&root_lock);
-        old_root = global_root;
-        next = core_insert_internal(h, val_str, old_root, pre);
-        LQFT_RWLOCK_UNLOCK_RD(&root_lock);
-        
-        LQFT_RWLOCK_WRLOCK(&root_lock);
-        if (global_root == old_root) {
-            global_root = next; LQFT_RWLOCK_UNLOCK_WR(&root_lock);
-            if (old_root) decref(old_root);
-            break;
-        } else {
-            LQFT_RWLOCK_UNLOCK_WR(&root_lock);
-            if (next) decref(next);
-        }
-    }
+    LQFT_RWLOCK_WRLOCK(&root_lock);
+    LQFTNode* next = core_insert_internal(h, val_str, global_root, pre);
+    LQFTNode* old = global_root; global_root = next; if (old) decref(old);
+    LQFT_RWLOCK_UNLOCK_WR(&root_lock);
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
@@ -437,23 +423,10 @@ static PyObject* method_insert(PyObject* self, PyObject* args) {
 static PyObject* method_delete(PyObject* self, PyObject* args) {
     unsigned long long h; if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     Py_BEGIN_ALLOW_THREADS
-    LQFTNode* old_root; LQFTNode* next;
-    while(1) {
-        LQFT_RWLOCK_RDLOCK(&root_lock);
-        old_root = global_root;
-        next = core_delete_internal(h, old_root);
-        LQFT_RWLOCK_UNLOCK_RD(&root_lock);
-        
-        LQFT_RWLOCK_WRLOCK(&root_lock);
-        if (global_root == old_root) {
-            global_root = next; LQFT_RWLOCK_UNLOCK_WR(&root_lock);
-            if (old_root) decref(old_root);
-            break;
-        } else {
-            LQFT_RWLOCK_UNLOCK_WR(&root_lock);
-            if (next) decref(next);
-        }
-    }
+    LQFT_RWLOCK_WRLOCK(&root_lock);
+    LQFTNode* next = core_delete_internal(h, global_root);
+    LQFTNode* old = global_root; global_root = next; if (old) decref(old);
+    LQFT_RWLOCK_UNLOCK_WR(&root_lock);
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
@@ -467,7 +440,6 @@ static PyObject* method_search(PyObject* self, PyObject* args) {
     if (result) safe_copy = portable_strdup(result); 
     LQFT_RWLOCK_UNLOCK_RD(&root_lock);
     Py_END_ALLOW_THREADS
-    
     if (safe_copy) {
         PyObject* py_res = PyUnicode_FromString(safe_copy);
         free(safe_copy); return py_res;
@@ -546,7 +518,6 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
     LQFT_RWLOCK_WRLOCK(&root_lock); 
     for(int i = 0; i < NUM_STRIPES; i++) LQFT_RWLOCK_WRLOCK(&stripe_locks[i].lock);
     
-    // Clear String Payloads
     if (registry) { 
         for (int i = 0; i < REGISTRY_SIZE; i++) { 
             if (registry[i] && registry[i] != TOMBSTONE) { 
@@ -556,7 +527,6 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
         } 
     }
     
-    // Drop massive memory chunks instantly instead of looping
     NodeChunk* nc = current_node_chunk;
     while(nc) { NodeChunk* next = nc->next; free(nc); nc = next; }
     current_node_chunk = NULL; node_chunk_idx = ARENA_CHUNK_SIZE; node_free_list = NULL;

@@ -3,10 +3,10 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V0.9.0 (Multi-Language Core Prep)
+# LQFT BUILD SYSTEM - V0.9.1 (Stability & Performance Patch)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
-# Focus: Custom Memory Arena, O(1) Fast-Path, and High Density
+# Status: Production Core for Multi-Language Roadmap
 
 # Systems Architect Logic: Cross-Platform Compiler Routing
 extra_compile_args = []
@@ -14,7 +14,7 @@ extra_compile_args = []
 if os.name == 'nt':
     # Windows (MSVC or MinGW)
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
-        # Aggressive GCC optimization for the new Slab Allocator
+        # Aggressive GCC optimization for the v0.9.x Slab Allocator
         extra_compile_args = ['-O3']
     else:
         # Microsoft Visual C++ optimizations
@@ -30,7 +30,7 @@ if os.path.exists("README.md"):
         long_description = fh.read()
 
 # Define the Native C-Extension
-# Note: Pointing to 'lqft_engine.c' containing the v1.0.6 Arena Allocator
+# Note: Standardized to 'lqft_engine.c' to match local environment naming.
 lqft_extension = Extension(
     'lqft_c_engine',
     sources=['lqft_engine.c'],
@@ -39,8 +39,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.9.0", 
-    description="LQFT Engine: Custom Memory Arena & O(1) Cryptographic Fast-Path (v0.9.0 Stable)",
+    version="0.9.1", 
+    description="LQFT Engine: Custom Arena Allocator & O(1) Fast-Path (v0.9.1 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",

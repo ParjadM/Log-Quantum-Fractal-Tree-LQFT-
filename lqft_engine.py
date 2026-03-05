@@ -4,10 +4,11 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# STRICT NATIVE ENTERPRISE ENGINE (v0.7.0)
+# STRICT NATIVE ENTERPRISE ENGINE (v0.9.0)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
 # Status: Pure Python fallback removed. Strict C-Core interface.
+# Features: Arena Allocator, Circuit Breaker, Disk Persistence, Batch FFI.
 
 try:
     import lqft_c_engine
@@ -34,6 +35,7 @@ class LQFT:
     def _get_64bit_hash(self, key):
         return int(hashlib.md5(key.encode()).hexdigest()[:16], 16)
 
+    # --- Systems Memory Management ---
     def set_auto_purge_threshold(self, threshold: float):
         self.max_memory_mb = threshold
 
@@ -41,6 +43,12 @@ class LQFT:
         current_mb = self._process.memory_info().rss / (1024 * 1024)
         print(f"\n[⚠️ CIRCUIT Breaker] Engine exceeded limit (Currently {current_mb:.1f} MB). Auto-Purging!")
         self.clear()
+
+    def get_stats(self):
+        return lqft_c_engine.get_metrics()
+
+    def clear(self):
+        return lqft_c_engine.free_all()
 
     # --- Native Disk Persistence ---
     def save_to_disk(self, filepath: str):
@@ -51,7 +59,7 @@ class LQFT:
             raise FileNotFoundError(f"Missing LQFT database file: {filepath}")
         lqft_c_engine.load_from_disk(filepath)
 
-    # --- Core Operations ---
+    # --- Core CRUD Operations ---
     def insert(self, key, value):
         self._validate_type(key, value)
         self.total_ops += 1
@@ -65,6 +73,11 @@ class LQFT:
         h = self._get_64bit_hash(key)
         lqft_c_engine.insert(h, value)
 
+    def search(self, key):
+        self._validate_type(key)
+        h = self._get_64bit_hash(key)
+        return lqft_c_engine.search(h)
+
     def remove(self, key):
         self._validate_type(key)
         h = self._get_64bit_hash(key)
@@ -73,10 +86,17 @@ class LQFT:
     def delete(self, key):
         self.remove(key)
 
-    def search(self, key):
-        self._validate_type(key)
-        h = self._get_64bit_hash(key)
-        return lqft_c_engine.search(h)
+    # --- High-Speed Batching (v0.9.0 Benchmark Optimization) ---
+    def insert_batch(self, keys, value_payload="batch_data"):
+        """Bypasses FFI loop tax by hashing in Python and sending one massive array to C."""
+        hashes = [self._get_64bit_hash(k) for k in keys]
+        self.total_ops += len(hashes)
+        lqft_c_engine.insert_batch(hashes, str(value_payload))
+
+    def search_batch(self, keys):
+        """High-speed bulk lookup for dashboards."""
+        hashes = [self._get_64bit_hash(k) for k in keys]
+        return lqft_c_engine.search_batch(hashes)
 
     # --- Pythonic Syntactic Sugar ---
     def __setitem__(self, key, value):
@@ -88,11 +108,8 @@ class LQFT:
             raise KeyError(key)
         return res
 
-    def clear(self):
-        return lqft_c_engine.free_all()
-
-    def get_stats(self):
-        return lqft_c_engine.get_metrics()
+    def __delitem__(self, key):
+        self.delete(key)
 
     def __del__(self):
         try: self.clear()
@@ -100,9 +117,9 @@ class LQFT:
 
     def status(self):
         return {
-            "mode": "Strict Native C-Engine",
+            "mode": "Strict Native C-Engine (Arena Allocator)",
             "items": lqft_c_engine.get_metrics().get('physical_nodes', 0),
-            "threshold": "DISABLED (Pure Hardware Mode)"
+            "threshold": f"{self.max_memory_mb} MB Circuit Breaker"
         }
 
 # Alias mapping so older benchmark scripts don't crash
