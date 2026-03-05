@@ -2,19 +2,19 @@ from setuptools import setup, find_packages, Extension
 import os
 import sys
 
-# Systems Architect Logic: Cross-Platform Compiler Detection
+# Systems Architect Logic: OS-Specific Compiler Routing
 extra_compile_args = []
+
 if os.name == 'nt':
+    # Windows (MSVC or MinGW)
     if 'gcc' in sys.version.lower() or 'mingw' in sys.executable.lower():
         extra_compile_args = ['-O3']
     else:
-        # MSVC specific optimization and security flags
         extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
-else:
-    # macOS/Linux: 
-    # Apple Clang 15+ treats missing POSIX declarations as fatal errors.
-    # We explicitly define Darwin/POSIX sources to expose pthread_rwlocks, 
-    # and safely downgrade Apple's strict fatal error checks.
+
+elif sys.platform == 'darwin':
+    # macOS (Apple Clang 15+): 
+    # Requires explicit POSIX definitions and warning-to-error downgrades.
     extra_compile_args = [
         '-O3', 
         '-D_DARWIN_C_SOURCE',
@@ -22,6 +22,14 @@ else:
         '-Wno-error=implicit-function-declaration',
         '-Wno-error=incompatible-function-pointer-types',
         '-Wno-error=int-conversion'
+    ]
+
+else:
+    # Linux (GCC): 
+    # Standard POSIX enforcement without Clang-specific warning flags.
+    extra_compile_args = [
+        '-O3', 
+        '-D_POSIX_C_SOURCE=200809L'
     ]
 
 # Load README for PyPI long_description
@@ -38,8 +46,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.8.4", 
-    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.4 Stable)",
+    version="0.8.5", 
+    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.5 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
@@ -57,6 +65,5 @@ setup(
         "Operating System :: OS Independent",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
-    # Bumped minimum requirement to bypass macOS Apple Silicon compiler errors
     python_requires='>=3.10',
 )
