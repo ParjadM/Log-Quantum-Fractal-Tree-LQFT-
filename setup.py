@@ -11,9 +11,9 @@ if os.name == 'nt':
         # MSVC specific optimization and security flags
         extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
 else:
-    # macOS/Linux: Let setup.py inject -O3 cleanly so we don't overwrite
-    # cibuildwheel's -arch cross-compilation flags!
-    extra_compile_args = ['-O3', '-Wall']
+    # macOS/Linux: Removed -Wall to prevent Apple Clang from treating 
+    # minor cross-compilation warnings as fatal linker errors.
+    extra_compile_args = ['-O3']
 
 # Load README for PyPI long_description
 long_description = "Log-Quantum Fractal Tree Engine"
