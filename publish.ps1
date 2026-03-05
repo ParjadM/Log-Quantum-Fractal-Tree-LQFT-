@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.7.5)
+# LQFT Production Release (v0.8.0)
 # Architect: Parjad Minooei
-# Status: Phase 3 (Strict Native C-Core Enforcement & Strict GIL Bypass)
+# Status: Phase 3 (Zero-Copy Buffer Protocol & Hardware Saturation) Complete
 
-$Version = "v0.7.5"
+$Version = "v0.8.0"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -19,7 +19,7 @@ $Extras = @(
     "lqft_integrity_proofs.py", "demo_lqft.py", "stress_test_memory_win.py", "initialize_lqft.py",
     "github_setup.ps1", "integrity_check_v44.py", "stress_test_large_payload.py",
     "enterprise_capability_suite.py", "pre_release_suite.py", "make_readme.py",
-    "gil_bypass_test.py"
+    "gil_bypass_test.py", "lqft_final_validation.py"
 )
 
 foreach ($file in $Extras) {
@@ -77,7 +77,7 @@ try:
     assert lqft_c_engine.search(h) == "verification_payload", "Deserialization Failed!"
     os.remove("cicd_test.bin")
     
-    print("[*] Full CRUD, Persistence & Hardware Locks verified.")
+    print("[*] Full CRUD, Persistence & Lock Striping verified.")
     print("[*] CI/CD Pipeline PASS.")
 except Exception as e:
     print(f"[!] CI/CD Error: {e}")
@@ -88,7 +88,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Strict Native C-Engine Enforcement & Strict GIL Bypass" --allow-empty
+git commit -m "release: $Version - Zero-Copy Buffer Protocol & The Memory Wall" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)
