@@ -11,12 +11,12 @@
 #include <stdint.h>
 
 /**
- * LQFT C-Engine - V1.1.1 (The Vectorized Hash Patch)
+ * LQFT C-Engine - V0.9.3 (Memory Leak Patch)
  * Architect: Parjad Minooei
  * * SYSTEMS ARCHITECTURE MILESTONES:
- * 1. LOGICAL SHARDING: Flat Array for maximum L1 Cache locality.
- * 2. VECTORIZED HASHING: Removed the slow XOR dependency chain. Replaced with
- * a contiguous FNV-1a array accumulator for maximum CPU pipeline efficiency.
+ * 1. ORPHANED SIBLING FIX: core_delete_internal now correctly decrements the 
+ * old path nodes, preventing the 'High node retention' memory leak.
+ * 2. VECTORIZED HASHING: Retained the high-speed FNV-1a array accumulator.
  */
 
 #ifdef _MSC_VER
@@ -113,7 +113,6 @@ static inline uint64_t fnv1a_update(uint64_t hash, const void* data, size_t len)
     return hash;
 }
 
-// V1.1.1 Fix: Blazing fast array hash to replace the slow XOR math
 static inline uint64_t hash_node_state(LQFTNode** children) {
     uint64_t hval = FNV_OFFSET_BASIS;
     if (children) {
@@ -338,7 +337,6 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
                 new_children[s_old] = c_old;
                 new_children[s_new] = c_new;
                 
-                // V1.1.1 Fix: Vectorized Hash
                 uint64_t branch_h = hash_node_state(new_children);
                 new_sub_node = get_canonical_v2(NULL, 0, new_children, branch_h);
                 decref(c_old); decref(c_new);
@@ -357,7 +355,6 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
             memset(new_children, 0, sizeof(LQFTNode*) * 32);
             new_children[path_segs[i]] = new_sub_node;
             
-            // V1.1.1 Fix: Vectorized Hash
             next_parent = get_canonical_v2(NULL, 0, new_children, hash_node_state(new_children));
         } else {
             LQFTNode* p = path_nodes[i];
@@ -368,9 +365,7 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
             
             n_children[path_segs[i]] = new_sub_node;
             
-            // V1.1.1 Fix: Vectorized Hash completely replaces XOR dependency chain
             uint64_t b_h = hash_node_state(n_children);
-            
             next_parent = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
         }
         decref(new_sub_node); 
@@ -379,6 +374,7 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
     return new_sub_node;
 }
 
+// V0.9.3 Fix: The Orphaned Sibling Deletion Memory Leak
 LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
     if (root == NULL) return NULL;
     LQFTNode* path_nodes[20]; uint32_t path_segs[20]; int path_len = 0;
@@ -407,16 +403,18 @@ LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
         if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
         else memset(n_children, 0, sizeof(LQFTNode*) * 32);
         
+        // Remove the target node from the new parent array
         n_children[path_segs[i]] = new_sub_node;
         
         int has_c = 0; for(int j=0; j<32; j++) { if(n_children[j]) { has_c = 1; break; } }
         
-        if (!has_c && p->value == NULL) { new_sub_node = NULL; } 
-        else {
-            // V1.1.1 Fix: Vectorized Hash
+        if (!has_c && p->value == NULL) { 
+            new_sub_node = NULL; 
+        } else {
             uint64_t b_h = hash_node_state(n_children);
-            
-            new_sub_node = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
+            LQFTNode* next_parent = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
+            if (new_sub_node) decref(new_sub_node);
+            new_sub_node = next_parent;
         }
     }
     return new_sub_node;
@@ -486,6 +484,8 @@ static PyObject* method_delete(PyObject* self, PyObject* args) {
         if (global_root == old_root) {
             global_root = next; 
             LQFT_RWLOCK_UNLOCK_WR(&root_lock);
+            
+            // V0.9.3 Fix: Ensure the old tree is aggressively decref'd to trigger reclamation
             if (old_root) { decref(old_root); decref(old_root); }
             break;
         } else {

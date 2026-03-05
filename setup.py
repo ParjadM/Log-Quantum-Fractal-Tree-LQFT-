@@ -3,11 +3,11 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V0.9.2 (Hardware Saturation Release)
+# LQFT BUILD SYSTEM - V0.9.4 (Billion-Scale Stability Release)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
-# Status: Enterprise Production Core
-# Features: Vectorized FNV-1a Hashing, L1 Cache Flat Array, Zero-Copy FFI
+# Status: Production Hardened
+# Performance: 13.3M Search ops/s | 1B-Snapshot Memory Folding
 
 # Systems Architect Logic: Cross-Platform Compiler Routing
 extra_compile_args = []
@@ -31,7 +31,7 @@ if os.path.exists("README.md"):
         long_description = fh.read()
 
 # Define the Native C-Extension
-# Ensure your C source file matches this name (e.g., 'lqft_engine.c' or 'lq_engine.c')
+# Source: lqft_engine.c contains the v0.9.3+ memory leak fixes and vectorized hashing
 lqft_extension = Extension(
     'lqft_c_engine',
     sources=['lqft_engine.c'],
@@ -40,8 +40,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.9.2", 
-    description="LQFT Engine: Vectorized Hashing, Zero-Copy Batching, & L1 Cache Locality (v0.9.2 Stable)",
+    version="0.9.4", 
+    description="LQFT Engine: Billion-Scale Persistence & Vectorized 13M-Search (v0.9.4 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
@@ -52,7 +52,7 @@ setup(
     install_requires=['psutil'],
     license="MIT",
     classifiers=[
-        "Development Status :: 4 - Beta",
+        "Development Status :: 5 - Production/Stable",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",

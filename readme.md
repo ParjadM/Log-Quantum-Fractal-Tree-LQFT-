@@ -14,7 +14,7 @@ By offloading core associative logic to a native C-Extension, the LQFT completel
 
 ---
 
-## 🧠 Core Architecture (v0.9.1 Multi-Language Core Prep)
+## 🧠 Core Architecture (v0.9.4 Multi-Language Core Prep)
 
 ### 1. Custom Memory Arena (Slab Allocator)
 Standard C `malloc()` introduces significant OS metadata overhead (up to 16 bytes per allocation). In v0.9.0, the LQFT utilizes a **Custom Slab Allocator**. The engine requests memory in 16KB "Arena Chunks" and performs O(1) bump-allocation internally, crushing the memory footprint down to **~104 bytes per node**.
