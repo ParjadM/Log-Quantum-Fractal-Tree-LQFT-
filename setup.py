@@ -27,8 +27,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.8.0", 
-    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.0 Stable)",
+    version="0.8.1", 
+    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.1 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
@@ -40,9 +40,12 @@ setup(
     license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Operating System :: OS Independent",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
-    python_requires='>=3.8',
+    # Bumped minimum requirement to bypass macOS Apple Silicon compiler errors
+    python_requires='>=3.10',
 )

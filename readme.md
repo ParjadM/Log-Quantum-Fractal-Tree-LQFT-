@@ -14,9 +14,9 @@ By offloading core associative logic to a native C-Extension, the LQFT completel
 
 ---
 
-## 🧠 Core Architecture (v0.8.0 Enterprise Release)
+## 🧠 Core Architecture (v0.8.1 Enterprise Release)
 
-### 1. Zero-Copy Buffer Protocol (New in v0.8.0)
+### 1. Zero-Copy Buffer Protocol (New in v0.8.1)
 The engine now features `insert_batch_raw`, a low-level C-API endpoint that accepts contiguous memory buffers (like Python's native `array`). This bypasses the heavy `PyLong` object conversion overhead, allowing the engine to ingest data at the absolute physical limit of the CPU's memory bus.
 
 ### 2. True Hardware Concurrency & Strict GIL Bypass

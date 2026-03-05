@@ -3,8 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.cibuildwheel]
-# Build for Python 3.8 to 3.12 (Enterprise standard range)
-build = "cp38-* cp39-* cp310-* cp311-* cp312-*"
+# Architect Fix: Target modern Python versions (3.10 - 3.12)
+# Python 3.8 lacks native Apple Silicon (ARM64) support, causing macOS runner failures.
+build = "cp310-* cp311-* cp312-*"
 
 # Skip 32-bit, PyPy, and musllinux for high-performance stability
 skip = "*-win32 *_i686 pp* *-musllinux_*"
@@ -16,7 +17,6 @@ CFLAGS="-O3 -Wall"
 [tool.cibuildwheel.linux]
 # Manylinux is the industry standard for portable Linux binaries
 archs = ["x86_64"]
-# (Removed 'yum install gcc' - Manylinux containers have it pre-installed natively)
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]

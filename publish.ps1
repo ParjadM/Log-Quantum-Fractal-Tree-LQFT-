@@ -1,8 +1,8 @@
-# LQFT Production Release (v0.8.0)
+# LQFT Production Release (v0.8.1)
 # Architect: Parjad Minooei
-# Status: Phase 3 (Zero-Copy Buffer Protocol & Hardware Saturation) Complete
+# Status: Apple Silicon CI/CD Fix & Modern Python Enforcement
 
-$Version = "v0.8.0"
+$Version = "v0.8.1"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING PRODUCTION RELEASE: $Version" -ForegroundColor Magenta
@@ -88,7 +88,7 @@ except Exception as e:
 # 4. GITHUB SYNC
 Write-Host "[*] Staging stable production core..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Zero-Copy Buffer Protocol & The Memory Wall" --allow-empty
+git commit -m "build: release $Version - CI/CD Apple Silicon fix & Python 3.10+ enforcement" --allow-empty
 git push origin main
 
 # 5. TAGGING (Triggers PyPI Action)
