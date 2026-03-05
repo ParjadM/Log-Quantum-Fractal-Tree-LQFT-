@@ -11,9 +11,11 @@ if os.name == 'nt':
         # MSVC specific optimization and security flags
         extra_compile_args = ['/O2', '/D_CRT_SECURE_NO_WARNINGS']
 else:
-    # macOS/Linux: Removed -Wall to prevent Apple Clang from treating 
-    # minor cross-compilation warnings as fatal linker errors.
-    extra_compile_args = ['-O3']
+    # macOS/Linux: 
+    # 1. -O3 for max performance
+    # 2. -w to suppress all pedantic Apple Clang warnings
+    # 3. -std=gnu99 to ensure POSIX locks (pthread) compile perfectly on macOS
+    extra_compile_args = ['-O3', '-w', '-std=gnu99']
 
 # Load README for PyPI long_description
 long_description = "Log-Quantum Fractal Tree Engine"
@@ -29,8 +31,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="0.8.2", 
-    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.2 Stable)",
+    version="0.8.3", 
+    description="LQFT Engine: Zero-Copy Buffer Protocol & Hardware Saturation (v0.8.3 Stable)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",
