@@ -13,7 +13,7 @@ The **Log-Quantum Fractal Tree (LQFT)** is a native Python extension that combin
 
 ---
 
-## Release Note (v1.1.2)
+## Release Note (v1.1.3)
 
 This release keeps the paired key/value batching patch.
 
@@ -30,12 +30,12 @@ What did not improve:
 
 Practical claim for this release:
 
-- v1.1.2 is a better write-heavy LQFT than v1.0.9.
-- v1.1.2 is not a proof that LQFT beats common in-memory data structures overall.
+- v1.1.3 is a better write-heavy LQFT than v1.0.9.
+- v1.1.3 is not a proof that LQFT beats common in-memory data structures overall.
 
 ---
 
-## Performance Snapshot (v1.1.2)
+## Performance Snapshot (v1.1.3)
 
 Verified environment: Windows workstation, Python 3.14 local build, native extension compiled in-place, benchmark matrix used during development before packaging cleanup.
 

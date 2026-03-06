@@ -16,30 +16,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.14 for wheel smoke test
+      - name: Set up Python 3.12 for wheel smoke test
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.12'
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.5
 
-      - name: Smoke test built cp314 wheel
+      - name: Smoke test built cp312 wheel
         shell: bash
         run: |
           python -m pip install --upgrade pip
           python - <<'PY'
           import glob
-          import os
           import subprocess
           import sys
 
-          matches = sorted(glob.glob("wheelhouse/*cp314*.whl"))
+          matches = sorted(glob.glob("wheelhouse/*cp312*.whl"))
           if not matches:
             available = sorted(glob.glob("wheelhouse/*.whl"))
             listing = "\n".join(available) if available else "<no wheels found in wheelhouse>"
             raise SystemExit(
-              "Expected a cp314 wheel in wheelhouse, but none was found. Available wheels:\n"
+              "Expected a cp312 wheel in wheelhouse, but none was found. Available wheels:\n"
               + listing
             )
 

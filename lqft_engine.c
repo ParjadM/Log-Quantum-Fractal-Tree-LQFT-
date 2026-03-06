@@ -17,7 +17,6 @@
 /**
  * LQFT C-Engine - v1.0.5 (Stabilization Build)
  * Architect: Parjad Minooei
- * Target: McMaster B.Tech / UofT MScAC Portfolio
  * * SYSTEMS ARCHITECTURE MILESTONES:
  * 1. F-04 RESOLUTION: 16k Hyper-Sharding eliminates lock contention to beat the 60s/10M budget.
  * 2. F-05 RESOLUTION: 2-Level Look-Ahead Prefetching masks DRAM latency during O(1) traversals.
