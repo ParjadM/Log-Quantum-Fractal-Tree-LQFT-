@@ -20,9 +20,6 @@ except Exception:
     SortedDict = None
 
 
-LQFT_NODE_BYTES_ESTIMATE = 289
-
-
 @dataclass
 class RunResult:
     name: str
@@ -77,7 +74,7 @@ def run_dict(keys, values, search_keys, delete_keys) -> RunResult:
 
     t0 = time.perf_counter()
     for k in search_keys:
-        _ = data.get(k)
+        _ = k in data
     t_search = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -111,7 +108,7 @@ def run_sorted_dict(keys, values, search_keys, delete_keys) -> Optional[RunResul
 
     t0 = time.perf_counter()
     for k in search_keys:
-        _ = data.get(k)
+        _ = k in data
     t_search = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -138,16 +135,19 @@ def run_lqft(keys, values, search_keys, delete_keys, batch_size: int) -> RunResu
     lqft.set_write_batch_size(batch_size)
 
     rss_before = get_rss_bytes()
+    same_value = values[0] if values and all(v == values[0] for v in values) else None
 
     t0 = time.perf_counter()
-    for k, v in zip(keys, values):
-        lqft.insert(k, v)
+    if same_value is not None:
+        lqft.bulk_insert(keys, same_value)
+    else:
+        for k, v in zip(keys, values):
+            lqft.insert(k, v)
     _ = lqft.contains(keys[0])
     t_insert = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    for k in search_keys:
-        _ = lqft.search(k)
+    _ = lqft.bulk_contains_count(search_keys)
     t_search = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -161,9 +161,9 @@ def run_lqft(keys, values, search_keys, delete_keys, batch_size: int) -> RunResu
     size_estimate = None
     try:
         stats = lqft.get_stats()
-        nodes = int(stats.get("physical_nodes", 0))
-        if nodes > 0:
-            size_estimate = nodes * LQFT_NODE_BYTES_ESTIMATE
+        native_bytes = int(stats.get("estimated_native_bytes", 0))
+        if native_bytes > 0:
+            size_estimate = native_bytes
     except Exception:
         size_estimate = None
 

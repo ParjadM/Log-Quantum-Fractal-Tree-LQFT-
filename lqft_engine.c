@@ -140,7 +140,9 @@ typedef struct {
     int64_t phys_added;
     int64_t phys_freed;
     int64_t logical_inserts;
-    char padding[40]; 
+    int64_t child_bytes_added;
+    int64_t child_bytes_freed;
+    char padding[24]; 
 } ALIGN_64 ThreadMetrics;
 
 static ALIGN_64 ThreadMetrics global_metrics_array[MAX_TRACKED_THREADS];
@@ -184,8 +186,11 @@ typedef struct LQFTNode {
     uint64_t key_hash;
     struct LQFTNode** children; 
     uint64_t full_hash_val;
-    uint32_t registry_idx; 
+    uint32_t value_len;
     int ref_count;
+    uint32_t child_bitmap;
+    uint16_t registry_idx;
+    uint8_t child_count;
 } LQFTNode;
 
 // ===================================================================
@@ -197,26 +202,12 @@ typedef struct NodeChunk {
     struct NodeChunk* next_global; 
 } NodeChunk;
 
-typedef struct ChildChunk {
-    LQFTNode* arrays[ARENA_CHUNK_SIZE][32];
-    struct ChildChunk* next_global; 
-} ChildChunk;
-
 static inline NodeChunk* alloc_node_chunk(void) {
 #ifdef _MSC_VER
     return (NodeChunk*)VirtualAlloc(NULL, sizeof(NodeChunk), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #else
     void* p = mmap(NULL, sizeof(NodeChunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     return (p == MAP_FAILED) ? NULL : (NodeChunk*)p;
-#endif
-}
-
-static inline ChildChunk* alloc_child_chunk(void) {
-#ifdef _MSC_VER
-    return (ChildChunk*)VirtualAlloc(NULL, sizeof(ChildChunk), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-#else
-    void* p = mmap(NULL, sizeof(ChildChunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
-    return (p == MAP_FAILED) ? NULL : (ChildChunk*)p;
 #endif
 }
 
@@ -229,23 +220,11 @@ static inline void free_node_chunk(NodeChunk* chunk) {
 #endif
 }
 
-static inline void free_child_chunk(ChildChunk* chunk) {
-    if (!chunk) return;
-#ifdef _MSC_VER
-    VirtualFree(chunk, 0, MEM_RELEASE);
-#else
-    munmap(chunk, sizeof(ChildChunk));
-#endif
-}
-
 static PaddedLock global_chunk_lock = {0};
 static NodeChunk* global_node_chunks = NULL;
-static ChildChunk* global_child_chunks = NULL;
 
 static NodeChunk* volatile pre_zeroed_node_chunks = NULL;
-static ChildChunk* volatile pre_zeroed_child_chunks = NULL;
 static volatile long pre_node_count = 0;
-static volatile long pre_child_count = 0;
 static volatile long bg_alloc_running = 0;
 
 typedef struct {
@@ -253,33 +232,20 @@ typedef struct {
     char padding[56];
 } ALIGN_64 GlobalNodePool;
 
-typedef struct {
-    LQFTNode*** volatile head;
-    char padding[56];
-} ALIGN_64 GlobalArrayPool;
-
 static GlobalNodePool node_pool = {NULL};
-static GlobalArrayPool array_pool = {NULL};
 
 typedef struct {
     NodeChunk* current_node_chunk;
     int node_chunk_idx;
     LQFTNode* node_free_list;
-    ChildChunk* current_child_chunk;
-    int child_chunk_idx;
-    LQFTNode*** array_free_list;
 } TLS_Arena;
 
-static THREAD_LOCAL TLS_Arena local_arena = {NULL, ARENA_CHUNK_SIZE, NULL, NULL, ARENA_CHUNK_SIZE, NULL};
+static THREAD_LOCAL TLS_Arena local_arena = {NULL, ARENA_CHUNK_SIZE, NULL};
 
 // Batched GC Retirement Chains
 static THREAD_LOCAL LQFTNode* local_ret_node_head = NULL;
 static THREAD_LOCAL LQFTNode* local_ret_node_tail = NULL;
 static THREAD_LOCAL int local_ret_node_count = 0;
-
-static THREAD_LOCAL LQFTNode*** local_ret_arr_head = NULL;
-static THREAD_LOCAL LQFTNode*** local_ret_arr_tail = NULL;
-static THREAD_LOCAL int local_ret_arr_count = 0;
 
 static inline void reset_tls_state_if_needed(void) {
     long ge = global_arena_epoch;
@@ -289,16 +255,10 @@ static inline void reset_tls_state_if_needed(void) {
     local_arena.current_node_chunk = NULL;
     local_arena.node_chunk_idx = ARENA_CHUNK_SIZE;
     local_arena.node_free_list = NULL;
-    local_arena.current_child_chunk = NULL;
-    local_arena.child_chunk_idx = ARENA_CHUNK_SIZE;
-    local_arena.array_free_list = NULL;
 
     local_ret_node_head = NULL;
     local_ret_node_tail = NULL;
     local_ret_node_count = 0;
-    local_ret_arr_head = NULL;
-    local_ret_arr_tail = NULL;
-    local_ret_arr_count = 0;
 
     local_arena_epoch = ge;
 }
@@ -322,25 +282,6 @@ static inline NodeChunk* pop_pre_zeroed_node_chunk(void) {
     }
 }
 
-static inline ChildChunk* pop_pre_zeroed_child_chunk(void) {
-    ChildChunk* head;
-    for (;;) {
-        head = pre_zeroed_child_chunks;
-        if (!head) return NULL;
-#ifdef _MSC_VER
-        if (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_child_chunks, (void*)head->next_global, (void*)head) == (void*)head) {
-            _InterlockedDecrement(&pre_child_count);
-            return head;
-        }
-#else
-        if (__sync_bool_compare_and_swap(&pre_zeroed_child_chunks, head, head->next_global)) {
-            __sync_fetch_and_sub(&pre_child_count, 1);
-            return head;
-        }
-#endif
-    }
-}
-
 static LQFTNode** registry = NULL;
 
 typedef struct {
@@ -352,12 +293,14 @@ static ALIGN_64 PaddedRoot global_roots[NUM_ROOTS];
 
 static ALIGN_64 PaddedRWLock root_locks[NUM_ROOTS];
 static ALIGN_64 PaddedLock stripe_locks[NUM_STRIPES];
+static volatile long global_reads_sealed = 0;
 
 #define VALUE_POOL_BUCKETS 4096
 
 typedef struct ValueEntry {
     char* str;
     uint64_t hash;
+    uint32_t len;
     volatile long ref_count;
     struct ValueEntry* next;
 } ValueEntry;
@@ -367,8 +310,8 @@ static ALIGN_64 PaddedLock value_pool_locks[VALUE_POOL_BUCKETS];
 static int64_t value_pool_entry_count = 0;
 static int64_t value_pool_total_bytes = 0;
 
-static const char* value_acquire(const char* value_ptr);
-static void value_release(const char* value_ptr);
+static const char* value_acquire(const char* value_ptr, uint64_t value_hash, uint32_t value_len);
+static void value_release(const char* value_ptr, uint64_t value_hash);
 static void value_pool_clear_all(void);
 
 const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
@@ -383,6 +326,10 @@ static inline uint64_t fnv1a_update(uint64_t hash, const void* data, size_t len)
     return hash;
 }
 
+static inline uint64_t hash_bytes_64(const char* data, uint32_t len) {
+    return fnv1a_update(FNV_OFFSET_BASIS, data, len);
+}
+
 static inline uint64_t hash_node_state(LQFTNode** children) {
     uint64_t hval = 0;
     if (children) {
@@ -393,6 +340,35 @@ static inline uint64_t hash_node_state(LQFTNode** children) {
         }
     }
     return (hval * FNV_PRIME) ^ FNV_OFFSET_BASIS;
+}
+
+static inline uint32_t popcount32(uint32_t value) {
+#if defined(_MSC_VER)
+    return (uint32_t)__popcnt(value);
+#else
+    return (uint32_t)__builtin_popcount(value);
+#endif
+}
+
+static inline LQFTNode* node_get_child(const LQFTNode* node, uint32_t segment) {
+    if (!node || !node->children) return NULL;
+    uint32_t bit = (uint32_t)1u << segment;
+    uint32_t bitmap = node->child_bitmap;
+    if ((bitmap & bit) == 0) return NULL;
+    uint32_t idx = popcount32(bitmap & (bit - 1u));
+    return node->children[idx];
+}
+
+static inline void node_expand_children(const LQFTNode* node, LQFTNode** out_children) {
+    memset(out_children, 0, sizeof(LQFTNode*) * 32);
+    if (!node || !node->children) return;
+    uint32_t bitmap = node->child_bitmap;
+    uint32_t idx = 0;
+    while (bitmap) {
+        uint32_t segment = popcount32((bitmap & (uint32_t)(-(int32_t)bitmap)) - 1u);
+        out_children[segment] = node->children[idx++];
+        bitmap &= (bitmap - 1u);
+    }
 }
 
 char* portable_strdup(const char* s) {
@@ -433,24 +409,6 @@ void* background_alloc_thread(void* arg) {
                 work_done = 1;
             }
         }
-        if (pre_child_count < 128) {
-            ChildChunk* cc = alloc_child_chunk();
-            if (cc) {
-                memset(cc, 0, sizeof(ChildChunk)); // Eager Page Fault
-#ifdef _MSC_VER
-                ChildChunk* old;
-                do { old = pre_zeroed_child_chunks; cc->next_global = old; } 
-                while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_child_chunks, (void*)cc, (void*)old) != (void*)old);
-                _InterlockedIncrement(&pre_child_count);
-#else
-                ChildChunk* old;
-                do { old = pre_zeroed_child_chunks; cc->next_global = old; } 
-                while (!__sync_bool_compare_and_swap(&pre_zeroed_child_chunks, old, cc));
-                __sync_fetch_and_add(&pre_child_count, 1);
-#endif
-                work_done = 1;
-            }
-        }
         if (!work_done) {
 #ifdef _MSC_VER
             Sleep(1);
@@ -462,7 +420,7 @@ void* background_alloc_thread(void* arg) {
     return 0;
 }
 
-LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, uint64_t full_hash) {
+LQFTNode* create_node(void* value, uint32_t value_len, uint64_t key_hash, LQFTNode** children_src, uint64_t full_hash) {
     reset_tls_state_if_needed();
 
     LQFTNode* node = NULL;
@@ -503,50 +461,41 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
         node = &local_arena.current_node_chunk->nodes[local_arena.node_chunk_idx++];
     }
     node->value = value;
+    node->value_len = value_len;
     node->key_hash = key_hash;
     node->full_hash_val = full_hash; 
     node->registry_idx = 0;
     node->ref_count = 0;
+    node->child_bitmap = 0;
+    node->child_count = 0;
     if (children_src) {
-        LQFTNode** arr = NULL;
-        if (!local_arena.array_free_list) {
-#ifdef _MSC_VER
-            LQFTNode*** free_chain;
-            do {
-                free_chain = (LQFTNode***)array_pool.head;
-                if (!free_chain) break;
-            } while (_InterlockedCompareExchangePointer((void* volatile*)&array_pool.head, NULL, (void*)free_chain) != (void*)free_chain);
-            local_arena.array_free_list = free_chain;
-#else
-            LQFTNode*** free_chain;
-            do {
-                free_chain = (LQFTNode***)array_pool.head;
-                if (!free_chain) break;
-            } while (!__sync_bool_compare_and_swap(&array_pool.head, free_chain, NULL));
-            local_arena.array_free_list = free_chain;
-#endif
-        }
-        if (local_arena.array_free_list) {
-            arr = (LQFTNode**)local_arena.array_free_list;
-            local_arena.array_free_list = (LQFTNode***)arr[0];
-        } else {
-            if (local_arena.child_chunk_idx >= ARENA_CHUNK_SIZE) {
-                ChildChunk* new_chunk = pop_pre_zeroed_child_chunk();
-                if (!new_chunk) {
-                    new_chunk = alloc_child_chunk();
-                }
-                if (!new_chunk) return NULL;
-                local_arena.current_child_chunk = new_chunk;
-                local_arena.child_chunk_idx = 0;
-                fast_lock_backoff(&global_chunk_lock.flag);
-                if (new_chunk) new_chunk->next_global = global_child_chunks;
-                global_child_chunks = new_chunk;
-                fast_unlock(&global_chunk_lock.flag);
+        uint32_t bitmap = 0;
+        uint8_t child_count = 0;
+        for (uint32_t i = 0; i < 32; i++) {
+            if (children_src[i]) {
+                bitmap |= ((uint32_t)1u << i);
+                child_count++;
             }
-            arr = (LQFTNode**)local_arena.current_child_chunk->arrays[local_arena.child_chunk_idx++];
         }
-        node->children = arr;
-        memcpy(node->children, children_src, sizeof(LQFTNode*) * 32);
+        node->child_bitmap = bitmap;
+        node->child_count = child_count;
+        if (child_count > 0) {
+            size_t child_bytes = (size_t)child_count * sizeof(LQFTNode*);
+            LQFTNode** arr = (LQFTNode**)malloc(child_bytes);
+            if (!arr) {
+                node->children = (LQFTNode**)local_arena.node_free_list;
+                local_arena.node_free_list = node;
+                return NULL;
+            }
+            uint32_t out_idx = 0;
+            for (uint32_t i = 0; i < 32; i++) {
+                if (children_src[i]) arr[out_idx++] = children_src[i];
+            }
+            node->children = arr;
+            get_my_metrics()->child_bytes_added += (int64_t)child_bytes;
+        } else {
+            node->children = NULL;
+        }
     } else {
         node->children = NULL; 
     }
@@ -570,46 +519,23 @@ void decref(LQFTNode* start_node) {
             if (registry[global_idx] == node) registry[global_idx] = TOMBSTONE;
             fast_unlock(&stripe_locks[stripe].flag);
             if (node->children) {
-                for (int i = 0; i < 32; i++) {
-                    if (node->children[i]) {
-                        if (top >= cap) {
-                            int next_cap = cap * 2;
-                            LQFTNode** grown = (LQFTNode**)realloc(cleanup_stack, (size_t)next_cap * sizeof(LQFTNode*));
-                            if (!grown) {
-                                free(cleanup_stack);
-                                return;
-                            }
-                            cleanup_stack = grown;
-                            cap = next_cap;
+                for (uint8_t i = 0; i < node->child_count; i++) {
+                    if (top >= cap) {
+                        int next_cap = cap * 2;
+                        LQFTNode** grown = (LQFTNode**)realloc(cleanup_stack, (size_t)next_cap * sizeof(LQFTNode*));
+                        if (!grown) {
+                            free(cleanup_stack);
+                            return;
                         }
-                        cleanup_stack[top++] = node->children[i];
+                        cleanup_stack = grown;
+                        cap = next_cap;
                     }
+                    cleanup_stack[top++] = node->children[i];
                 }
-                LQFTNode*** arr = (LQFTNode***)node->children;
-                arr[0] = (LQFTNode**)local_ret_arr_head;
-                local_ret_arr_head = arr;
-                if (local_ret_arr_count == 0) local_ret_arr_tail = arr;
-                local_ret_arr_count++;
-                if (local_ret_arr_count >= 1024) {
-#ifdef _MSC_VER
-                    LQFTNode*** old_head;
-                    do {
-                        old_head = (LQFTNode***)array_pool.head;
-                        local_ret_arr_tail[0] = (LQFTNode**)old_head;
-                    } while (_InterlockedCompareExchangePointer((void* volatile*)&array_pool.head, (void*)local_ret_arr_head, (void*)old_head) != (void*)old_head);
-#else
-                    LQFTNode*** old_head;
-                    do {
-                        old_head = (LQFTNode***)array_pool.head;
-                        local_ret_arr_tail[0] = (LQFTNode**)old_head;
-                    } while (!__sync_bool_compare_and_swap(&array_pool.head, old_head, local_ret_arr_head));
-#endif
-                    local_ret_arr_head = NULL;
-                    local_ret_arr_tail = NULL;
-                    local_ret_arr_count = 0;
-                }
+                get_my_metrics()->child_bytes_freed += (int64_t)node->child_count * (int64_t)sizeof(LQFTNode*);
+                free(node->children);
             }
-            if (node->value) value_release((const char*)node->value);
+            if (node->value) value_release((const char*)node->value, hash_bytes_64((const char*)node->value, node->value_len));
             node->children = (LQFTNode**)local_ret_node_head;
             local_ret_node_head = node;
             if (local_ret_node_count == 0) local_ret_node_tail = node;
@@ -638,23 +564,36 @@ void decref(LQFTNode* start_node) {
     free(cleanup_stack);
 }
 
-static inline int node_matches_signature(const LQFTNode* node, const char* value_ptr, uint64_t key_hash, LQFTNode** children) {
+static inline int node_matches_signature(const LQFTNode* node, const char* value_ptr, uint32_t value_len, uint64_t key_hash, LQFTNode** children) {
     if (!node) return 0;
     if (node->key_hash != key_hash) return 0;
+    if (node->value_len != value_len) return 0;
 
     if ((node->value == NULL) != (value_ptr == NULL)) return 0;
-    if (node->value && value_ptr && strcmp((const char*)node->value, value_ptr) != 0) return 0;
+    if (node->value && value_ptr && node->value != (const void*)value_ptr && strcmp((const char*)node->value, value_ptr) != 0) return 0;
 
-    if ((node->children == NULL) != (children == NULL)) return 0;
-    if (node->children && children) {
+    uint32_t child_bitmap = 0;
+    uint8_t child_count = 0;
+    if (children) {
         for (int i = 0; i < 32; i++) {
-            if (node->children[i] != children[i]) return 0;
+            if (children[i]) {
+                child_bitmap |= ((uint32_t)1u << i);
+                child_count++;
+            }
+        }
+    }
+    if (node->child_bitmap != child_bitmap) return 0;
+    if (node->child_count != child_count) return 0;
+    if (node->children) {
+        uint32_t idx = 0;
+        for (int i = 0; i < 32; i++) {
+            if (children[i] && node->children[idx++] != children[i]) return 0;
         }
     }
     return 1;
 }
 
-LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** children, uint64_t full_hash) {
+LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t value_hash, uint32_t value_len, uint64_t key_hash, LQFTNode** children, uint64_t full_hash) {
     uint32_t stripe = (uint32_t)(full_hash % NUM_STRIPES);
     uint32_t local_idx = (uint32_t)((full_hash ^ (full_hash >> 32)) & STRIPE_MASK);
     uint32_t global_idx = (stripe * STRIPE_SIZE) + local_idx;
@@ -666,7 +605,7 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     for (;;) {
         LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
-        if (slot != TOMBSTONE && slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, key_hash, children)) {
+        if (slot != TOMBSTONE && slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, value_len, key_hash, children)) {
             ATOMIC_INC(&slot->ref_count);
             fast_unlock(&stripe_locks[stripe].flag);
             return slot;
@@ -677,9 +616,9 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     }
     fast_unlock(&stripe_locks[stripe].flag);
 
-    const char* canonical_value = value_ptr ? value_acquire(value_ptr) : NULL;
+    const char* canonical_value = value_ptr ? value_acquire(value_ptr, value_hash, value_len) : NULL;
     if (value_ptr && !canonical_value) return NULL;
-    LQFTNode* new_node = create_node((void*)canonical_value, key_hash, children, full_hash);
+    LQFTNode* new_node = create_node((void*)canonical_value, value_len, key_hash, children, full_hash);
     if (!new_node) return NULL;
     new_node->ref_count = 1;
 
@@ -692,16 +631,13 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
         LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
         if (slot == TOMBSTONE) { if (first_tombstone == -1) first_tombstone = (int)local_idx; }
-        else if (slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, key_hash, children)) {
+        else if (slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, value_len, key_hash, children)) {
             ATOMIC_INC(&slot->ref_count);
             fast_unlock(&stripe_locks[stripe].flag);
-            if (new_node->value) value_release((const char*)new_node->value);
+            if (new_node->value) value_release((const char*)new_node->value, value_hash);
             if (new_node->children) {
-                LQFTNode*** arr = (LQFTNode***)new_node->children;
-                arr[0] = (LQFTNode**)local_ret_arr_head;
-                local_ret_arr_head = arr;
-                if (local_ret_arr_count == 0) local_ret_arr_tail = arr;
-                local_ret_arr_count++;
+                get_my_metrics()->child_bytes_freed += (int64_t)new_node->child_count * (int64_t)sizeof(LQFTNode*);
+                free(new_node->children);
             }
             new_node->children = (LQFTNode**)local_ret_node_head;
             local_ret_node_head = new_node;
@@ -714,8 +650,8 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
         if (local_idx == start_idx) break; 
     }
     if (new_node->children) {
-        for (int i = 0; i < 32; i++) {
-            if (new_node->children[i]) ATOMIC_INC(&new_node->children[i]->ref_count);
+        for (uint8_t i = 0; i < new_node->child_count; i++) {
+            ATOMIC_INC(&new_node->children[i]->ref_count);
         }
     }
     uint32_t insert_local = (first_tombstone != -1) ? (uint32_t)first_tombstone : local_idx;
@@ -731,29 +667,26 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     return new_node;
 }
 
-LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, uint64_t pre_leaf_base) {
+LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, uint64_t val_hash, uint32_t val_len, LQFTNode* root, uint64_t pre_leaf_base) {
     LQFTNode* path_nodes[20]; uint32_t path_segs[20]; int path_len = 0;
     LQFTNode* curr = root; int bit_depth = 0;
     while (curr != NULL && curr->value == NULL) {
         uint32_t segment = (h >> bit_depth) & MASK;
         path_nodes[path_len] = curr; path_segs[path_len] = segment; path_len++;
-        LQFTNode* next_node = curr->children[segment];
+        LQFTNode* next_node = node_get_child(curr, segment);
         if (next_node == NULL) { curr = NULL; break; }
-        if (bit_depth + BIT_PARTITION < 64) {
-            uint32_t next_segment = (h >> (bit_depth + BIT_PARTITION)) & MASK;
-            PREFETCH(&next_node->children[next_segment]);
-        } else {
-            PREFETCH(next_node);
-        }
+        PREFETCH(next_node);
         curr = next_node; 
         bit_depth += BIT_PARTITION;
     }
     LQFTNode* new_sub_node = NULL;
     uint64_t leaf_h = (pre_leaf_base ^ h) * FNV_PRIME;
-    if (curr == NULL) { 
-        new_sub_node = get_canonical_v2(val_ptr, h, NULL, leaf_h); 
-    } else if (curr->key_hash == h) { 
-        new_sub_node = get_canonical_v2(val_ptr, h, curr->children, leaf_h); 
+    if (curr == NULL) {
+        new_sub_node = get_canonical_v2(val_ptr, val_hash, val_len, h, NULL, leaf_h);
+    } else if (curr->key_hash == h) {
+        LQFTNode* curr_children[32];
+        node_expand_children(curr, curr_children);
+        new_sub_node = get_canonical_v2(val_ptr, val_hash, val_len, h, curr_children, leaf_h);
     } else {
         uint64_t old_h = curr->key_hash;
         uint64_t old_leaf_h = (pre_leaf_base ^ old_h) * FNV_PRIME;
@@ -762,33 +695,40 @@ LQFTNode* core_insert_internal(uint64_t h, const char* val_ptr, LQFTNode* root, 
             uint32_t s_old = (old_h >> temp_depth) & MASK;
             uint32_t s_new = (h >> temp_depth) & MASK;
             if (s_old != s_new) {
-                LQFTNode* c_old = get_canonical_v2((const char*)curr->value, old_h, curr->children, old_leaf_h);
-                LQFTNode* c_new = get_canonical_v2(val_ptr, h, NULL, leaf_h);
+                uint64_t old_value_hash = curr->value ? hash_bytes_64((const char*)curr->value, curr->value_len) : 0;
+                LQFTNode* curr_children[32];
+                node_expand_children(curr, curr_children);
+                LQFTNode* c_old = get_canonical_v2((const char*)curr->value, old_value_hash, curr->value_len, old_h, curr_children, old_leaf_h);
+                LQFTNode* c_new = get_canonical_v2(val_ptr, val_hash, val_len, h, NULL, leaf_h);
                 LQFTNode* new_children[32]; memset(new_children, 0, sizeof(LQFTNode*) * 32);
                 new_children[s_old] = c_old; new_children[s_new] = c_new;
                 uint64_t branch_h = hash_node_state(new_children);
-                new_sub_node = get_canonical_v2(NULL, 0, new_children, branch_h);
+                new_sub_node = get_canonical_v2(NULL, 0, 0, 0, new_children, branch_h);
                 decref(c_old); decref(c_new); break;
             } else { 
                 path_nodes[path_len] = NULL; path_segs[path_len] = s_old; path_len++; temp_depth += BIT_PARTITION; 
             }
         }
-        if (new_sub_node == NULL) new_sub_node = get_canonical_v2(val_ptr, h, curr->children, leaf_h);
+        if (new_sub_node == NULL) {
+            LQFTNode* curr_children[32];
+            node_expand_children(curr, curr_children);
+            new_sub_node = get_canonical_v2(val_ptr, val_hash, val_len, h, curr_children, leaf_h);
+        }
     }
     for (int i = path_len - 1; i >= 0; i--) {
         LQFTNode* next_parent;
         if (path_nodes[i] == NULL) {
             LQFTNode* new_children[32]; memset(new_children, 0, sizeof(LQFTNode*) * 32);
             new_children[path_segs[i]] = new_sub_node;
-            next_parent = get_canonical_v2(NULL, 0, new_children, hash_node_state(new_children));
+            next_parent = get_canonical_v2(NULL, 0, 0, 0, new_children, hash_node_state(new_children));
         } else {
             LQFTNode* p = path_nodes[i];
             LQFTNode* n_children[32]; 
-            if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
-            else memset(n_children, 0, sizeof(LQFTNode*) * 32);
+            node_expand_children(p, n_children);
             n_children[path_segs[i]] = new_sub_node;
             uint64_t b_h = hash_node_state(n_children);
-            next_parent = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
+            uint64_t parent_value_hash = p->value ? hash_bytes_64((const char*)p->value, p->value_len) : 0;
+            next_parent = get_canonical_v2((const char*)p->value, parent_value_hash, p->value_len, p->key_hash, n_children, b_h);
         }
         decref(new_sub_node); new_sub_node = next_parent;
     }
@@ -802,11 +742,11 @@ LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
     while (curr != NULL && curr->value == NULL) {
         uint32_t segment = (h >> bit_depth) & MASK;
         path_nodes[path_len] = curr; path_segs[path_len] = segment; path_len++;
-        if (curr->children == NULL || curr->children[segment] == NULL) {
+        if (node_get_child(curr, segment) == NULL) {
             ATOMIC_INC(&root->ref_count);
             return root; 
         }
-        curr = curr->children[segment]; bit_depth += BIT_PARTITION;
+        curr = node_get_child(curr, segment); bit_depth += BIT_PARTITION;
     }
     if (curr == NULL || curr->key_hash != h) {
         ATOMIC_INC(&root->ref_count);
@@ -816,15 +756,15 @@ LQFTNode* core_delete_internal(uint64_t h, LQFTNode* root) {
     for (int i = path_len - 1; i >= 0; i--) {
         LQFTNode* p = path_nodes[i];
         LQFTNode* n_children[32]; 
-        if (p->children) memcpy(n_children, p->children, sizeof(LQFTNode*) * 32);
-        else memset(n_children, 0, sizeof(LQFTNode*) * 32);
+        node_expand_children(p, n_children);
         n_children[path_segs[i]] = new_sub_node;
         int has_c = 0; for(int j=0; j<32; j++) { if(n_children[j]) { has_c = 1; break; } }
         if (!has_c && p->value == NULL) { 
             new_sub_node = NULL; 
         } else {
             uint64_t b_h = hash_node_state(n_children);
-            new_sub_node = get_canonical_v2((const char*)p->value, p->key_hash, n_children, b_h);
+            uint64_t parent_value_hash = p->value ? hash_bytes_64((const char*)p->value, p->value_len) : 0;
+            new_sub_node = get_canonical_v2((const char*)p->value, parent_value_hash, p->value_len, p->key_hash, n_children, b_h);
         }
     }
     return new_sub_node;
@@ -834,8 +774,7 @@ char* core_search(uint64_t h, LQFTNode* root) {
     LQFTNode* curr = root; 
     int bit_depth = 0;
     while (curr != NULL && curr->value == NULL) {
-        if (curr->children == NULL) return NULL;
-        curr = curr->children[(h >> bit_depth) & MASK];
+        curr = node_get_child(curr, (h >> bit_depth) & MASK);
         bit_depth += BIT_PARTITION;
     }
     if (curr != NULL && curr->key_hash == h) return (char*)curr->value;
@@ -850,6 +789,31 @@ static inline uint64_t hash_key_string(const char* key_str) {
         h ^= (uint64_t)(*p++);
         h *= FNV_PRIME;
     }
+    return h;
+}
+
+static inline uint64_t hash_key_bytes(const char* key_str, Py_ssize_t key_len) {
+    uint64_t h = FNV_OFFSET_BASIS;
+    const unsigned char* p = (const unsigned char*)key_str;
+    for (Py_ssize_t i = 0; i < key_len; i++) {
+        h ^= (uint64_t)p[i];
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+static THREAD_LOCAL const char* tls_last_key_ptr = NULL;
+static THREAD_LOCAL Py_ssize_t tls_last_key_len = -1;
+static THREAD_LOCAL uint64_t tls_last_key_hash = 0;
+
+static inline uint64_t hash_key_utf8_cached(const char* key_str, Py_ssize_t key_len) {
+    if (key_str == tls_last_key_ptr && key_len == tls_last_key_len) {
+        return tls_last_key_hash;
+    }
+    uint64_t h = hash_key_bytes(key_str, key_len);
+    tls_last_key_ptr = key_str;
+    tls_last_key_len = key_len;
+    tls_last_key_hash = h;
     return h;
 }
 
@@ -873,14 +837,25 @@ static void c_internal_insert_rw(uint64_t h, const char* val_str) {
     // Small TLS cache avoids repeated value hashing for hot constants (e.g. "x", "active").
     static THREAD_LOCAL const char* last_val_ptr = NULL;
     static THREAD_LOCAL uint64_t last_pre = 0;
+    static THREAD_LOCAL uint64_t last_val_hash = 0;
+    static THREAD_LOCAL uint32_t last_val_len = 0;
     uint64_t pre;
+    uint64_t val_hash;
+    uint32_t val_len;
     if (val_str == last_val_ptr) {
         pre = last_pre;
+        val_hash = last_val_hash;
+        val_len = last_val_len;
     } else {
+        size_t val_size = strlen(val_str);
         pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
-        pre = fnv1a_update(pre, val_str, strlen(val_str));
+        pre = fnv1a_update(pre, val_str, val_size);
+        val_hash = fnv1a_update(FNV_OFFSET_BASIS, val_str, val_size);
+        val_len = (uint32_t)val_size;
         last_val_ptr = val_str;
         last_pre = pre;
+        last_val_hash = val_hash;
+        last_val_len = val_len;
     }
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     get_my_metrics()->logical_inserts++;
@@ -890,7 +865,7 @@ static void c_internal_insert_rw(uint64_t h, const char* val_str) {
         LQFTNode* old_root = global_roots[shard].root;
         if (old_root) ATOMIC_INC(&old_root->ref_count);
         LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
-        LQFTNode* next = core_insert_internal(h, val_str, old_root, pre);
+        LQFTNode* next = core_insert_internal(h, val_str, val_hash, val_len, old_root, pre);
         LQFT_RWLOCK_WRLOCK(&root_locks[shard].lock);
         if (global_roots[shard].root == old_root) {
             global_roots[shard].root = next;
@@ -937,15 +912,9 @@ void* stress_worker(void* arg) {
     local_arena.current_node_chunk = NULL;
     local_arena.node_chunk_idx = ARENA_CHUNK_SIZE;
     local_arena.node_free_list = NULL;
-    local_arena.current_child_chunk = NULL;
-    local_arena.child_chunk_idx = ARENA_CHUNK_SIZE;
-    local_arena.array_free_list = NULL;
     local_ret_node_head = NULL;
     local_ret_node_tail = NULL;
     local_ret_node_count = 0;
-    local_ret_arr_head = NULL;
-    local_ret_arr_tail = NULL;
-    local_ret_arr_count = 0;
     my_metrics = NULL;
     get_my_metrics();
     uint32_t rng_state = 123456789 ^ (sargs->thread_id * 1999999973);
@@ -1002,8 +971,24 @@ static PyObject* method_internal_stress_test(PyObject* self, PyObject* const* ar
     Py_RETURN_NONE;
 }
 
+static PyObject* method_set_reads_sealed(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    int enabled = PyObject_IsTrue(args[0]);
+    if (enabled < 0) return NULL;
+#ifdef _MSC_VER
+    _InterlockedExchange(&global_reads_sealed, enabled ? 1 : 0);
+#else
+    __sync_lock_test_and_set(&global_reads_sealed, enabled ? 1 : 0);
+#endif
+    Py_RETURN_NONE;
+}
+
 static PyObject* method_insert(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 2) return NULL;
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before writing");
+        return NULL;
+    }
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     const char* val_str = PyUnicode_AsUTF8(args[1]);
     if (!val_str) return NULL;
@@ -1015,10 +1000,15 @@ static PyObject* method_insert(PyObject* self, PyObject* const* args, Py_ssize_t
 
 static PyObject* method_insert_key_value(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 2) return NULL;
-    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before writing");
+        return NULL;
+    }
+    Py_ssize_t key_len = 0;
+    const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     const char* val_str = PyUnicode_AsUTF8(args[1]);
     if (!key_str || !val_str) return NULL;
-    uint64_t h = hash_key_string(key_str);
+    uint64_t h = hash_key_utf8_cached(key_str, key_len);
     Py_BEGIN_ALLOW_THREADS
     c_internal_insert_rw(h, val_str);
     Py_END_ALLOW_THREADS
@@ -1030,6 +1020,10 @@ static THREAD_LOCAL Py_ssize_t tls_bulk_hashes_cap = 0;
 
 static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 2) return NULL;
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before writing");
+        return NULL;
+    }
     PyObject* seq = PySequence_Fast(args[0], "bulk_insert_keys expects a sequence of string keys");
     if (!seq) return NULL;
 
@@ -1078,6 +1072,10 @@ static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, 
 
 static PyObject* method_bulk_insert_range(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 4) return NULL;
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before writing");
+        return NULL;
+    }
     const char* prefix = PyUnicode_AsUTF8(args[0]);
     if (!prefix) return NULL;
     unsigned long long start = PyLong_AsUnsignedLongLong(args[1]);
@@ -1104,6 +1102,13 @@ static PyObject* method_search(PyObject* self, PyObject* const* args, Py_ssize_t
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     const char* result_ptr = NULL;
     LQFTNode* current_root = NULL;
+    if (global_reads_sealed) {
+        current_root = global_roots[shard].root;
+        if (current_root) result_ptr = core_search(h, current_root);
+        if (result_ptr) return PyUnicode_FromString(result_ptr);
+        Py_RETURN_NONE;
+    }
+
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
     current_root = global_roots[shard].root;
@@ -1128,12 +1133,20 @@ static PyObject* method_search(PyObject* self, PyObject* const* args, Py_ssize_t
 
 static PyObject* method_search_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 1) return NULL;
-    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    Py_ssize_t key_len = 0;
+    const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     if (!key_str) return NULL;
-    uint64_t h = hash_key_string(key_str);
+    uint64_t h = hash_key_utf8_cached(key_str, key_len);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     const char* result_ptr = NULL;
     LQFTNode* current_root = NULL;
+    if (global_reads_sealed) {
+        current_root = global_roots[shard].root;
+        if (current_root) result_ptr = core_search(h, current_root);
+        if (result_ptr) return PyUnicode_FromString(result_ptr);
+        Py_RETURN_NONE;
+    }
+
     Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
     current_root = global_roots[shard].root;
@@ -1161,16 +1174,20 @@ static PyObject* method_contains(PyObject* self, PyObject* const* args, Py_ssize
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     int found = 0;
+    if (global_reads_sealed) {
+        LQFTNode* current_root = global_roots[shard].root;
+        if (current_root && core_search(h, current_root) != NULL) found = 1;
+        if (found) Py_RETURN_TRUE;
+        Py_RETURN_FALSE;
+    }
+
     Py_BEGIN_ALLOW_THREADS
-    LQFTNode* current_root = NULL;
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-    current_root = global_roots[shard].root;
-    if (current_root) ATOMIC_INC(&current_root->ref_count);
-    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+    LQFTNode* current_root = global_roots[shard].root;
     if (current_root) {
         if (core_search(h, current_root) != NULL) found = 1;
-        decref(current_root);
     }
+    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
     Py_END_ALLOW_THREADS
     if (found) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
@@ -1178,21 +1195,26 @@ static PyObject* method_contains(PyObject* self, PyObject* const* args, Py_ssize
 
 static PyObject* method_contains_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 1) return NULL;
-    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    Py_ssize_t key_len = 0;
+    const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     if (!key_str) return NULL;
-    uint64_t h = hash_key_string(key_str);
+    uint64_t h = hash_key_utf8_cached(key_str, key_len);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     int found = 0;
+    if (global_reads_sealed) {
+        LQFTNode* current_root = global_roots[shard].root;
+        if (current_root && core_search(h, current_root) != NULL) found = 1;
+        if (found) Py_RETURN_TRUE;
+        Py_RETURN_FALSE;
+    }
+
     Py_BEGIN_ALLOW_THREADS
-    LQFTNode* current_root = NULL;
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-    current_root = global_roots[shard].root;
-    if (current_root) ATOMIC_INC(&current_root->ref_count);
-    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+    LQFTNode* current_root = global_roots[shard].root;
     if (current_root) {
         if (core_search(h, current_root) != NULL) found = 1;
-        decref(current_root);
     }
+    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
     Py_END_ALLOW_THREADS
     if (found) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
@@ -1209,17 +1231,21 @@ static PyObject* method_bulk_contains_count(PyObject* self, PyObject* const* arg
         return PyLong_FromLong(0);
     }
 
-    uint64_t* hashes = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
-    if (!hashes) {
-        Py_DECREF(seq);
-        return PyErr_NoMemory();
+    if (n > tls_bulk_hashes_cap) {
+        uint64_t* grown = (uint64_t*)realloc(tls_bulk_hashes, (size_t)n * sizeof(uint64_t));
+        if (!grown) {
+            Py_DECREF(seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_hashes = grown;
+        tls_bulk_hashes_cap = n;
     }
+    uint64_t* hashes = tls_bulk_hashes;
 
     PyObject** items = PySequence_Fast_ITEMS(seq);
     for (Py_ssize_t i = 0; i < n; i++) {
         const char* key_str = PyUnicode_AsUTF8(items[i]);
         if (!key_str) {
-            free(hashes);
             Py_DECREF(seq);
             return NULL;
         }
@@ -1227,25 +1253,36 @@ static PyObject* method_bulk_contains_count(PyObject* self, PyObject* const* arg
     }
 
     Py_ssize_t hit_count = 0;
+    if (global_reads_sealed) {
+        Py_BEGIN_ALLOW_THREADS
+        for (Py_ssize_t i = 0; i < n; i++) {
+            uint64_t h = hashes[i];
+            uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+            LQFTNode* current_root = global_roots[shard].root;
+            if (current_root) {
+                if (core_search(h, current_root) != NULL) hit_count++;
+            }
+        }
+        Py_END_ALLOW_THREADS
+        Py_DECREF(seq);
+        return PyLong_FromSsize_t(hit_count);
+    }
+
     Py_BEGIN_ALLOW_THREADS
     for (Py_ssize_t i = 0; i < n; i++) {
         uint64_t h = hashes[i];
         uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-        LQFTNode* current_root = NULL;
 
         LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-        current_root = global_roots[shard].root;
-        if (current_root) ATOMIC_INC(&current_root->ref_count);
-        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+        LQFTNode* current_root = global_roots[shard].root;
 
         if (current_root) {
             if (core_search(h, current_root) != NULL) hit_count++;
-            decref(current_root);
         }
+        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
     }
     Py_END_ALLOW_THREADS
 
-    free(hashes);
     Py_DECREF(seq);
     return PyLong_FromSsize_t(hit_count);
 }
@@ -1262,21 +1299,32 @@ static PyObject* method_bulk_contains_range_count(PyObject* self, PyObject* cons
     uint64_t prefix_hash = fnv1a_update(FNV_OFFSET_BASIS, prefix, strlen(prefix));
     unsigned long long hit_count = 0;
 
+    if (global_reads_sealed) {
+        Py_BEGIN_ALLOW_THREADS
+        for (unsigned long long i = 0; i < count; i++) {
+            uint64_t h = fnv1a_update_u64_decimal(prefix_hash, (uint64_t)(start + i));
+            uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+            LQFTNode* current_root = global_roots[shard].root;
+            if (current_root) {
+                if (core_search(h, current_root) != NULL) hit_count++;
+            }
+        }
+        Py_END_ALLOW_THREADS
+        return PyLong_FromUnsignedLongLong(hit_count);
+    }
+
     Py_BEGIN_ALLOW_THREADS
     for (unsigned long long i = 0; i < count; i++) {
         uint64_t h = fnv1a_update_u64_decimal(prefix_hash, (uint64_t)(start + i));
         uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-        LQFTNode* current_root = NULL;
 
         LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-        current_root = global_roots[shard].root;
-        if (current_root) ATOMIC_INC(&current_root->ref_count);
-        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+        LQFTNode* current_root = global_roots[shard].root;
 
         if (current_root) {
             if (core_search(h, current_root) != NULL) hit_count++;
-            decref(current_root);
         }
+        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
     }
     Py_END_ALLOW_THREADS
 
@@ -1285,6 +1333,10 @@ static PyObject* method_bulk_contains_range_count(PyObject* self, PyObject* cons
 
 static PyObject* method_delete(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 1) return NULL;
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before deleting");
+        return NULL;
+    }
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     Py_BEGIN_ALLOW_THREADS
@@ -1313,9 +1365,14 @@ static PyObject* method_delete(PyObject* self, PyObject* const* args, Py_ssize_t
 
 static PyObject* method_delete_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 1) return NULL;
-    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before deleting");
+        return NULL;
+    }
+    Py_ssize_t key_len = 0;
+    const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     if (!key_str) return NULL;
-    uint64_t h = hash_key_string(key_str);
+    uint64_t h = hash_key_utf8_cached(key_str, key_len);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     Py_BEGIN_ALLOW_THREADS
     while(1) {
@@ -1345,28 +1402,49 @@ static PyObject* method_get_metrics(PyObject* self, PyObject* args) {
     int64_t total_phys_added = 0;
     int64_t total_phys_freed = 0;
     int64_t total_logical = 0;
+    int64_t total_child_bytes_added = 0;
+    int64_t total_child_bytes_freed = 0;
     for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
         total_phys_added += global_metrics_array[i].phys_added;
         total_phys_freed += global_metrics_array[i].phys_freed;
         total_logical += global_metrics_array[i].logical_inserts;
+        total_child_bytes_added += global_metrics_array[i].child_bytes_added;
+        total_child_bytes_freed += global_metrics_array[i].child_bytes_freed;
     }
     int64_t net_phys = total_phys_added - total_phys_freed;
+    int64_t net_child_bytes = total_child_bytes_added - total_child_bytes_freed;
     double deduplication_ratio = net_phys > 0 ? (double)total_logical / (double)net_phys : 0.0;
     double value_pool_bytes_per_logical_insert = total_logical > 0
         ? (double)value_pool_total_bytes / (double)total_logical
         : 0.0;
+    int64_t estimated_native_bytes =
+        net_phys * (int64_t)sizeof(LQFTNode) +
+        net_child_bytes +
+        value_pool_total_bytes;
+    double bytes_per_physical_node = net_phys > 0
+        ? (double)estimated_native_bytes / (double)net_phys
+        : 0.0;
     return Py_BuildValue(
-        "{s:L, s:L, s:d, s:L, s:L, s:d}",
+        "{s:L, s:L, s:d, s:L, s:L, s:d, s:L, s:L, s:d, s:i, s:i}",
         "physical_nodes", net_phys,
         "logical_inserts", total_logical,
         "deduplication_ratio", deduplication_ratio,
         "value_pool_entries", value_pool_entry_count,
         "value_pool_bytes", value_pool_total_bytes,
-        "value_pool_bytes_per_logical_insert", value_pool_bytes_per_logical_insert
+        "value_pool_bytes_per_logical_insert", value_pool_bytes_per_logical_insert,
+        "active_child_bytes", net_child_bytes,
+        "estimated_native_bytes", estimated_native_bytes,
+        "bytes_per_physical_node", bytes_per_physical_node,
+        "sizeof_lqft_node", (int)sizeof(LQFTNode),
+        "sizeof_child_pointer", (int)sizeof(LQFTNode*)
     );
 }
 
 static PyObject* method_free_all(PyObject* self, PyObject* args) {
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before clearing");
+        return NULL;
+    }
     Py_BEGIN_ALLOW_THREADS
     for(int i = 0; i < NUM_ROOTS; i++) LQFT_RWLOCK_WRLOCK(&root_locks[i].lock);
     for(int i = 0; i < NUM_STRIPES; i++) fast_lock_backoff(&stripe_locks[i].flag);
@@ -1386,20 +1464,14 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
     pre_zeroed_node_chunks = NULL;
     pre_node_count = 0;
 
-    ChildChunk* cc = global_child_chunks;
-    while(cc) { ChildChunk* n = cc->next_global; free_child_chunk(cc); cc = n; }
-    global_child_chunks = NULL;
-
-    cc = pre_zeroed_child_chunks;
-    while(cc) { ChildChunk* n = cc->next_global; free_child_chunk(cc); cc = n; }
-    pre_zeroed_child_chunks = NULL;
-    pre_child_count = 0;
-
     node_pool.head = NULL;
-    array_pool.head = NULL;
     fast_unlock(&global_chunk_lock.flag);
     for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
-        global_metrics_array[i].phys_added = 0; global_metrics_array[i].phys_freed = 0; global_metrics_array[i].logical_inserts = 0;
+        global_metrics_array[i].phys_added = 0;
+        global_metrics_array[i].phys_freed = 0;
+        global_metrics_array[i].logical_inserts = 0;
+        global_metrics_array[i].child_bytes_added = 0;
+        global_metrics_array[i].child_bytes_freed = 0;
     }
 #ifdef _MSC_VER
     _InterlockedExchange(&registered_threads_count, 0);
@@ -1428,6 +1500,7 @@ static PyMethodDef LQFTMethods[] = {
     {"contains_key", (PyCFunction)method_contains_key, METH_FASTCALL, "Contains check using string key fast path"},
     {"bulk_contains_count", (PyCFunction)method_bulk_contains_count, METH_FASTCALL, "Bulk contains checks, returns hit count"},
     {"bulk_contains_range_count", (PyCFunction)method_bulk_contains_range_count, METH_FASTCALL, "Bulk contains on generated keys prefix+index range"},
+    {"set_reads_sealed", (PyCFunction)method_set_reads_sealed, METH_FASTCALL, "Enable or disable lock-free sealed read mode"},
     {"delete", (PyCFunction)method_delete, METH_FASTCALL, "Fast-path delete single key"},
     {"delete_key", (PyCFunction)method_delete_key, METH_FASTCALL, "Delete using string key fast path"},
     {"internal_stress_test", (PyCFunction)method_internal_stress_test, METH_FASTCALL, "Run native C stress test"},
@@ -1448,9 +1521,7 @@ PyMODINIT_FUNC PyInit_lqft_c_engine(void) {
     for(int i = 0; i < VALUE_POOL_BUCKETS; i++) value_pool_locks[i].flag = 0;
     for(int j = 0; j < 4; j++) {
         NodeChunk* nc = alloc_node_chunk();
-        ChildChunk* cc = alloc_child_chunk();
         if (nc) { memset(nc, 0, sizeof(NodeChunk)); nc->next_global = pre_zeroed_node_chunks; pre_zeroed_node_chunks = nc; pre_node_count++; }
-        if (cc) { memset(cc, 0, sizeof(ChildChunk)); cc->next_global = pre_zeroed_child_chunks; pre_zeroed_child_chunks = cc; pre_child_count++; }
     }
     bg_alloc_running = 1;
 #ifdef _MSC_VER
@@ -1461,16 +1532,15 @@ PyMODINIT_FUNC PyInit_lqft_c_engine(void) {
     return PyModule_Create(&lqftmodule); 
 }
 
-static const char* value_acquire(const char* value_ptr) {
+static const char* value_acquire(const char* value_ptr, uint64_t value_hash, uint32_t value_len) {
     if (!value_ptr) return NULL;
 
-    uint64_t h = fnv1a_update(FNV_OFFSET_BASIS, value_ptr, strlen(value_ptr));
-    uint32_t bucket = (uint32_t)(h & (VALUE_POOL_BUCKETS - 1));
+    uint32_t bucket = (uint32_t)(value_hash & (VALUE_POOL_BUCKETS - 1));
 
     fast_lock_backoff(&value_pool_locks[bucket].flag);
     ValueEntry* cur = value_pool[bucket];
     while (cur) {
-        if (cur->hash == h && strcmp(cur->str, value_ptr) == 0) {
+        if (cur->hash == value_hash && cur->len == value_len && strcmp(cur->str, value_ptr) == 0) {
             ATOMIC_INC(&cur->ref_count);
             fast_unlock(&value_pool_locks[bucket].flag);
             return cur->str;
@@ -1483,14 +1553,14 @@ static const char* value_acquire(const char* value_ptr) {
         fast_unlock(&value_pool_locks[bucket].flag);
         return NULL;
     }
-    size_t value_len = strlen(value_ptr);
     e->str = portable_strdup(value_ptr);
     if (!e->str) {
         free(e);
         fast_unlock(&value_pool_locks[bucket].flag);
         return NULL;
     }
-    e->hash = h;
+    e->hash = value_hash;
+    e->len = value_len;
     e->ref_count = 1;
     e->next = value_pool[bucket];
     value_pool[bucket] = e;
@@ -1500,23 +1570,22 @@ static const char* value_acquire(const char* value_ptr) {
     return e->str;
 }
 
-static void value_release(const char* value_ptr) {
+static void value_release(const char* value_ptr, uint64_t value_hash) {
     if (!value_ptr) return;
 
-    uint64_t h = fnv1a_update(FNV_OFFSET_BASIS, value_ptr, strlen(value_ptr));
-    uint32_t bucket = (uint32_t)(h & (VALUE_POOL_BUCKETS - 1));
+    uint32_t bucket = (uint32_t)(value_hash & (VALUE_POOL_BUCKETS - 1));
 
     fast_lock_backoff(&value_pool_locks[bucket].flag);
     ValueEntry* prev = NULL;
     ValueEntry* cur = value_pool[bucket];
     while (cur) {
-        if (cur->hash == h && (cur->str == value_ptr || strcmp(cur->str, value_ptr) == 0)) {
+        if (cur->hash == value_hash && (cur->str == value_ptr || strcmp(cur->str, value_ptr) == 0)) {
             long new_ref = ATOMIC_DEC(&cur->ref_count);
             if (new_ref == 0) {
                 if (prev) prev->next = cur->next;
                 else value_pool[bucket] = cur->next;
                 value_pool_entry_count -= 1;
-                value_pool_total_bytes -= (int64_t)(strlen(cur->str) + 1);
+                value_pool_total_bytes -= (int64_t)(cur->len + 1);
                 free(cur->str);
                 free(cur);
             }

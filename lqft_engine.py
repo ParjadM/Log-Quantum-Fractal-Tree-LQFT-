@@ -1,6 +1,5 @@
 import os
 import sys
-import hashlib
 import threading
 
 try:
@@ -44,6 +43,8 @@ class LQFT:
         "_pending_keys",
         "_pending_value",
         "_pending_batch_size",
+        "_use_prehash_fastpath",
+        "_reads_sealed",
     )
 
     # F-03 & F-04: Restored migration_threshold to sync API signatures across the suite
@@ -67,6 +68,8 @@ class LQFT:
         self._pending_keys = []
         self._pending_value = None
         self._pending_batch_size = 2048
+        self._use_prehash_fastpath = False
+        self._reads_sealed = False
         with LQFT._instance_lock:
             LQFT._live_instances += 1
 
@@ -77,8 +80,25 @@ class LQFT:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
 
     def _get_64bit_hash(self, key):
-        # Deterministic 64-bit hash keeps key mapping stable across processes/runs.
-        return int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "little")
+        # Process-local hash fast path; fallback stays 64-bit masked.
+        return hash(key) & 0xFFFFFFFFFFFFFFFF
+
+    def set_prehash_fastpath(self, enabled: bool):
+        self._use_prehash_fastpath = bool(enabled)
+
+    def seal_reads(self):
+        if self._pending_keys:
+            self._flush_pending_inserts()
+        setter = getattr(lqft_c_engine, "set_reads_sealed", None)
+        if setter is not None:
+            setter(True)
+            self._reads_sealed = True
+
+    def unseal_reads(self):
+        setter = getattr(lqft_c_engine, "set_reads_sealed", None)
+        if setter is not None:
+            setter(False)
+        self._reads_sealed = False
 
     def _flush_pending_inserts(self):
         if not self._pending_keys:
@@ -193,6 +213,8 @@ class LQFT:
         return stats.get('logical_inserts', 0)
 
     def clear(self):
+        if self._reads_sealed:
+            self.unseal_reads()
         if self._pending_keys:
             self._flush_pending_inserts()
         # Global clear (shared native state). Keep explicit to avoid accidental data loss.
@@ -203,6 +225,8 @@ class LQFT:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if type(value) is not str:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+        if self._reads_sealed:
+            self.unseal_reads()
         
         # Heuristic Circuit Breaker check
         if self.auto_purge_enabled:
@@ -224,6 +248,10 @@ class LQFT:
             return
 
         if self._native_insert_kv is not None:
+            if self._use_prehash_fastpath:
+                h = self._get_64bit_hash(key)
+                lqft_c_engine.insert(h, value)
+                return
             self._native_insert_kv(key, value)
             return
 
@@ -235,6 +263,9 @@ class LQFT:
             self._flush_pending_inserts()
         if type(key) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
+        if self._use_prehash_fastpath:
+            h = self._get_64bit_hash(key)
+            return lqft_c_engine.search(h)
         if self._native_search_key is not None:
             return self._native_search_key(key)
         h = self._get_64bit_hash(key)
@@ -245,6 +276,13 @@ class LQFT:
             self._flush_pending_inserts()
         if type(key) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
+        if self._reads_sealed:
+            self.unseal_reads()
+        if self._use_prehash_fastpath:
+            h = self._get_64bit_hash(key)
+            if hasattr(lqft_c_engine, 'delete'):
+                lqft_c_engine.delete(h)
+            return
         if self._native_delete_key is not None:
             self._native_delete_key(key)
             return
@@ -260,13 +298,18 @@ class LQFT:
             self._flush_pending_inserts()
         if type(key) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
+        if self._use_prehash_fastpath:
+            h = self._get_64bit_hash(key)
+            return lqft_c_engine.contains(h)
         if self._native_contains_key is not None:
-            return bool(self._native_contains_key(key))
+            return self._native_contains_key(key)
         return self.search(key) is not None
 
     def bulk_insert(self, keys, value):
         if type(value) is not str:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+        if self._reads_sealed:
+            self.unseal_reads()
         if self._pending_keys:
             self._flush_pending_inserts()
         if self._native_bulk_insert_keys is not None:
@@ -291,6 +334,8 @@ class LQFT:
             raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
         if type(value) is not str:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+        if self._reads_sealed:
+            self.unseal_reads()
         if self._pending_keys:
             self._flush_pending_inserts()
         if self._native_bulk_insert_range is not None:

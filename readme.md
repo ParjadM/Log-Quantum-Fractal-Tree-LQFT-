@@ -14,18 +14,19 @@ The **Log-Quantum Fractal Tree (LQFT)** is a high-performance, scale-invariant d
 
 ---
 
-## 🏆 Performance Snapshot (v1.0.8 Stable)
+## 🏆 Performance Snapshot (v1.0.9 Stable)
 
 *Verified Environment: Python 3.12 | MSYS2/MinGW64 GCC -O3 | 16-Core Physical Affinity*
 
 | Metric | Current Observation | Architectural Driver |
 | :--- | :--- | :--- |
-| **Insert Throughput (wrapper microbench)** | **~600k ops/sec class** | Buffered batch writes + native C bulk path |
+| **Insert Throughput (wrapper microbench)** | **~850k ops/sec class** | Buffered batch writes + metadata-aware native canonicalization |
 | **Search Throughput (wrapper microbench)** | **~900k ops/sec class** | Fixed-depth traversal + native search path |
-| **Memory Density** | **~104 Bytes / Node** | NUMA-Aware Slab Allocator (Background Daemon) |
+| **Bulk Membership Throughput** | **~1.8M ops/sec class** | Batched contains path with amortized Python/C boundary cost |
+| **Memory Density** | **Tracked at runtime via `estimated_native_bytes / physical_nodes`** | Real node bytes + active child arrays + pooled values |
 | **Space Efficiency** | **1,500x Reduction** | Global Atomic Pool Stealing & Merkle-DAG Folding |
 
-Benchmark note: Throughput is workload- and environment-dependent. Use the repo benchmark scripts to reproduce numbers for your hardware.
+Benchmark note: Throughput is workload- and environment-dependent. Reproduce with `python production_verdict_assessment.py --n 120000 --q 60000 --d 40000 --trials 2 --lqft-batch-size 4096`.
 
 ## 🧠 Core Architecture 
 

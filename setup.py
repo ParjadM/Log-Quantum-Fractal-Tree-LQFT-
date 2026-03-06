@@ -3,7 +3,7 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V1.0.8 (Stability Build)
+# LQFT BUILD SYSTEM - V1.0.9 (Stability Build)
 # Architect: Parjad Minooei
 # ---------------------------------------------------------
 
@@ -40,7 +40,7 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="1.0.8", 
+    version="1.0.9", 
     description="LQFT Engine: native C extension with bounded-depth lookups and structural sharing",
     long_description=long_description,
     long_description_content_type="text/markdown",
