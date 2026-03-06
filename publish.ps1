@@ -1,37 +1,14 @@
-# LQFT Production Release (v1.0.9 Gold Master)
+# LQFT Production Release (v1.1.0)
 # Architect: Parjad Minooei
 # Target: McMaster B.Tech Portfolio
 
-$Version = "v1.0.9"
+$Version = "v1.1.0"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
-Write-Host " 🚀 INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
+Write-Host " INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
 Write-Host "==========================================================" -ForegroundColor Magenta
 
-# 1. PURGE EXPERIMENTAL FILES
-# 1.0.9 FIX: Aggressively removing ALL legacy benchmarks that crash CI/CD
-$Extras = @(
-    "test1.py", 
-    "stress_test_10m.py", "consistency_audit.py", "validation.py", 
-    "benchmark.py", "test_lqft.py", "comprehensive_benchmark.py", 
-    "adaptive_benchmark.py", "trie_vs_lqft_benchmark.py", "graph_vs_lqft.py", 
-    "the_architects_choice.py", "complexity_demonstrator.py", 
-    "complexity_crossover.py", "leetcode_187_test.py", "memory_benchmark.py", 
-    "perplexity_benchmark_suite.py", "advanced_lqft_stress_suite.py", 
-    "three_sum_lqft_test.py", "lqft_integrity_proofs.py", "demo_lqft.py", 
-    "stress_test_memory_win.py", "initialize_lqft.py", "integrity_check_v44.py", 
-    "stress_test_large_payload.py", "enterprise_capability_suite.py", 
-    "pre_release_suite.py", "make_readme.py", "gil_bypass_test.py", 
-    "lqft_final_validation.py", "density_test.py", 
-    "crud_benchmark.py", "showdown_test.py", 
-    "comprehensive_ranking.py", "leak_test.py", "leak_verification.py",
-    "sharded_lock_benchmark.py"
-)
-foreach ($file in $Extras) {
-    if (Test-Path $file) { Remove-Item $file -Force }
-}
-
-# 2. CLEAN CACHE
+# 1. CLEAN BUILD ARTIFACTS ONLY
 $Artifacts = @("build", "dist", "lqft_python_engine.egg-info", "__pycache__", "wheelhouse")
 foreach ($folder in $Artifacts) {
     if (Test-Path $folder) { Remove-Item -Recurse -Force $folder }
@@ -39,22 +16,29 @@ foreach ($folder in $Artifacts) {
 Get-ChildItem -Filter "*.pyd" -Recurse | Remove-Item -Force
 Get-ChildItem -Filter "*.so" -Recurse | Remove-Item -Force
 
-# 3. FORCE FILE CHANGE TO TRIGGER ACTIONS
-Write-Host "[*] Forcing physical file change to trigger GitHub Actions..." -ForegroundColor Cyan
+# 2. WRITE VERSION MARKER
+Write-Host "[*] Writing release version marker..." -ForegroundColor Cyan
 $Version | Out-File -FilePath "version.txt" -Encoding utf8
 
+# 3. RELEASE NOTE SUMMARY
+Write-Host "[*] Release note summary:" -ForegroundColor Cyan
+Write-Host "    - Keep native paired key/value batching for unique-value writes." -ForegroundColor Gray
+Write-Host "    - Pure write throughput improved materially in local benchmarking." -ForegroundColor Gray
+Write-Host "    - Read-heavy and mixed workloads remain benchmark-dependent." -ForegroundColor Gray
+Write-Host "    - This release should not claim broad superiority over dict/hash tables." -ForegroundColor Gray
+
 # 4. GITHUB SYNC
-Write-Host "[*] Staging $Version production source..." -ForegroundColor Cyan
+Write-Host "[*] Staging $Version release source..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - Final CI/CD Purge and Gold Master Freeze"
+git commit -m "release: $Version - write batching uplift with blunt benchmark notes"
 git push origin main
 
-# 5. FRESH TAGGING (Bypasses GitHub webhook bugs)
-Write-Host "[*] Pushing clean tag $Version to trigger PyPI build..." -ForegroundColor Cyan
+# 5. TAG RELEASE
+Write-Host "[*] Pushing tag $Version to trigger PyPI build..." -ForegroundColor Cyan
 git tag $Version
 git push origin $Version
 
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host " ✅ DEPLOYMENT $Version LIVE" -ForegroundColor Green
-Write-Host " The CI/CD Pipeline will now trigger perfectly." -ForegroundColor Cyan
+Write-Host " DEPLOYMENT $Version LIVE" -ForegroundColor Green
+Write-Host " Release notes are intentionally conservative about practical performance." -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Green

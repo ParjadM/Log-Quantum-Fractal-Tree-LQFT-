@@ -1,0 +1,24 @@
+include README.md
+include LICENSE.md
+include lqft_engine.c
+include lqft_engine.py
+include version.txt
+
+prune benchmarks
+prune benchmark_app
+prune build
+prune dist
+prune __pycache__
+prune .pytest_cache
+prune .pkgtest
+prune .pkgtest-release
+prune .pkgtest-run
+prune .pkgtest-run2
+prune .pkgtest-sdist
+prune .pkgtest-wheel
+prune .pypi109bench
+
+global-exclude *.py[cod]
+global-exclude *.pyd
+global-exclude *.so
+global-exclude .coverage

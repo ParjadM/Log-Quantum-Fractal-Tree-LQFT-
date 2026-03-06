@@ -1017,6 +1017,8 @@ static PyObject* method_insert_key_value(PyObject* self, PyObject* const* args, 
 
 static THREAD_LOCAL uint64_t* tls_bulk_hashes = NULL;
 static THREAD_LOCAL Py_ssize_t tls_bulk_hashes_cap = 0;
+static THREAD_LOCAL const char** tls_bulk_values = NULL;
+static THREAD_LOCAL Py_ssize_t tls_bulk_values_cap = 0;
 
 static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 2) return NULL;
@@ -1067,6 +1069,83 @@ static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, 
     Py_END_ALLOW_THREADS
 
     Py_DECREF(seq);
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_bulk_insert_key_values(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    if (global_reads_sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "LQFT reads are sealed for lock-free mode; unseal before writing");
+        return NULL;
+    }
+
+    PyObject* key_seq = PySequence_Fast(args[0], "bulk_insert_key_values expects a sequence of string keys");
+    if (!key_seq) return NULL;
+    PyObject* value_seq = PySequence_Fast(args[1], "bulk_insert_key_values expects a sequence of string values");
+    if (!value_seq) {
+        Py_DECREF(key_seq);
+        return NULL;
+    }
+
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(key_seq);
+    if (n != PySequence_Fast_GET_SIZE(value_seq)) {
+        Py_DECREF(key_seq);
+        Py_DECREF(value_seq);
+        PyErr_SetString(PyExc_ValueError, "bulk_insert_key_values expects matching key/value lengths");
+        return NULL;
+    }
+    if (n <= 0) {
+        Py_DECREF(key_seq);
+        Py_DECREF(value_seq);
+        Py_RETURN_NONE;
+    }
+
+    if (n > tls_bulk_hashes_cap) {
+        uint64_t* grown = (uint64_t*)realloc(tls_bulk_hashes, (size_t)n * sizeof(uint64_t));
+        if (!grown) {
+            Py_DECREF(key_seq);
+            Py_DECREF(value_seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_hashes = grown;
+        tls_bulk_hashes_cap = n;
+    }
+    if (n > tls_bulk_values_cap) {
+        const char** grown = (const char**)realloc((void*)tls_bulk_values, (size_t)n * sizeof(const char*));
+        if (!grown) {
+            Py_DECREF(key_seq);
+            Py_DECREF(value_seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_values = grown;
+        tls_bulk_values_cap = n;
+    }
+
+    uint64_t* hashes = tls_bulk_hashes;
+    const char** values = tls_bulk_values;
+    PyObject** key_items = PySequence_Fast_ITEMS(key_seq);
+    PyObject** value_items = PySequence_Fast_ITEMS(value_seq);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        Py_ssize_t key_len = 0;
+        const char* key_str = PyUnicode_AsUTF8AndSize(key_items[i], &key_len);
+        const char* value_str = PyUnicode_AsUTF8(value_items[i]);
+        if (!key_str || !value_str) {
+            Py_DECREF(key_seq);
+            Py_DECREF(value_seq);
+            return NULL;
+        }
+        hashes[i] = hash_key_bytes(key_str, key_len);
+        values[i] = value_str;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < n; i++) {
+        c_internal_insert_rw(hashes[i], values[i]);
+    }
+    Py_END_ALLOW_THREADS
+
+    Py_DECREF(key_seq);
+    Py_DECREF(value_seq);
     Py_RETURN_NONE;
 }
 
@@ -1493,6 +1572,7 @@ static PyMethodDef LQFTMethods[] = {
     {"insert", (PyCFunction)method_insert, METH_FASTCALL, "Fast-path insert single key"},
     {"insert_key_value", (PyCFunction)method_insert_key_value, METH_FASTCALL, "Insert using string key/value fast path"},
     {"bulk_insert_keys", (PyCFunction)method_bulk_insert_keys, METH_FASTCALL, "Bulk insert string keys with one value"},
+    {"bulk_insert_key_values", (PyCFunction)method_bulk_insert_key_values, METH_FASTCALL, "Bulk insert paired string keys and values"},
     {"bulk_insert_range", (PyCFunction)method_bulk_insert_range, METH_FASTCALL, "Bulk insert generated keys prefix+index range"},
     {"search", (PyCFunction)method_search, METH_FASTCALL, "Fast-path search single key"},
     {"search_key", (PyCFunction)method_search_key, METH_FASTCALL, "Search using string key fast path"},

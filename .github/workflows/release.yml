@@ -16,8 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python 3.14 for wheel smoke test
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.5
+
+      - name: Smoke test built cp314 wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install wheelhouse/*cp314*.whl
+          python -c "import lqft_engine; engine = lqft_engine.LQFT(); print(type(engine).__name__)"
 
       - uses: actions/upload-artifact@v4
         with:

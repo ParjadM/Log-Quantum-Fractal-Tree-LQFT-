@@ -1,4 +1,4 @@
-# Log-Quantum Fractal Tree (LQFT) 🚀
+# Log-Quantum Fractal Tree (LQFT)
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](#)
 [![C-Engine](https://img.shields.io/badge/Native-C-red.svg)](#)
@@ -6,29 +6,50 @@
 [![Architecture](https://img.shields.io/badge/Architecture-Merkle_HAMT-pink.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE.md)
 
-## 📌 Project Overview
+## Project Overview
 
-The **Log-Quantum Fractal Tree (LQFT)** is a high-performance, scale-invariant data structure engine designed for massive data deduplication and persistent state management. Synthesizing **Hash Array Mapped Trie (HAMT)** routing with **Merkle-DAG structural folding**, the LQFT provides deterministic $O(1)$ search latency and sub-linear $O(\Sigma)$ space complexity.
+The **Log-Quantum Fractal Tree (LQFT)** is a native Python extension that combines HAMT-style routing with structural sharing. The project is still interesting as a systems exercise and as a specialized persistent structure, but the benchmark results in this repository do not support a general claim that LQFT is faster than mainstream in-memory structures in practice.
 
-*Status: **Code Frozen** (March 2026) for the BFS/DFS Visual Mastery Sprint.*
 
 ---
 
-## 🏆 Performance Snapshot (v1.0.9 Stable)
+## Release Note (v1.1.0)
 
-*Verified Environment: Python 3.12 | MSYS2/MinGW64 GCC -O3 | 16-Core Physical Affinity*
+This release keeps the paired key/value batching patch.
+
+What improved:
+
+- Unique-value write throughput improved materially versus the previous local baseline.
+- The improvement is strongest in pure-write workloads, especially at 4 and 8 threads.
+
+What did not improve:
+
+- LQFT is still not generally competitive with Python dict or straightforward hash-table implementations.
+- Read-heavy workloads are still weaker than mainstream alternatives.
+- Mixed workloads improved only slightly or remained benchmark-dependent.
+
+Practical claim for this release:
+
+- v1.1.0 is a better write-heavy LQFT than v1.0.9.
+- v1.1.0 is not a proof that LQFT beats common in-memory data structures overall.
+
+---
+
+## Performance Snapshot (v1.1.0)
+
+Verified environment: Windows workstation, Python 3.14 local build, native extension compiled in-place, benchmark matrix used during development before packaging cleanup.
 
 | Metric | Current Observation | Architectural Driver |
 | :--- | :--- | :--- |
-| **Insert Throughput (wrapper microbench)** | **~850k ops/sec class** | Buffered batch writes + metadata-aware native canonicalization |
-| **Search Throughput (wrapper microbench)** | **~900k ops/sec class** | Fixed-depth traversal + native search path |
-| **Bulk Membership Throughput** | **~1.8M ops/sec class** | Batched contains path with amortized Python/C boundary cost |
+| **Pure Write Throughput** | **Improved strongly vs. v1.0.9/local baseline** | Native paired key/value batching for unique-value writes |
+| **Pure Read Throughput** | **Still workload-dependent and behind dict/hash-table peers** | Traversal cost + concurrency overhead |
+| **Mixed Throughput** | **Improved modestly at best** | Write batching helps, but read-side costs still dominate |
 | **Memory Density** | **Tracked at runtime via `estimated_native_bytes / physical_nodes`** | Real node bytes + active child arrays + pooled values |
-| **Space Efficiency** | **1,500x Reduction** | Global Atomic Pool Stealing & Merkle-DAG Folding |
+| **Practical Competitiveness** | **Not generally competitive yet** | Constant-factor overhead still too high |
 
-Benchmark note: Throughput is workload- and environment-dependent. Reproduce with `python production_verdict_assessment.py --n 120000 --q 60000 --d 40000 --trials 2 --lqft-batch-size 4096`.
+Benchmark note: throughput is workload- and environment-dependent. The release claim for this package should stay conservative and centered on write-heavy improvement rather than broad superiority.
 
-## 🧠 Core Architecture 
+## Core Architecture
 
 ### 1. Hardware Synchronization (Thread Affinity & NUMA)
 The LQFT explicitly pins OS threads to physical CPU cores to prevent scheduler migrations, guaranteeing that hot memory paths remain in the L1/L2 cache. Memory is mapped using `MAP_POPULATE` and `VirtualAlloc` to guarantee NUMA-local hardware proximity.
@@ -43,39 +64,44 @@ The LQFT utilizes a fixed 64-bit hash space partitioned into 13 segments.
 
 ---
 
-## 🛠️ Getting Started
+## Getting Started
 
 ### Installation
 
-The engine requires a C compiler (GCC/MinGW or MSVC) to build the native extension.
+For normal users, install the published wheel directly from PyPI:
+
+```bash
+pip install lqft-python-engine
+```
+
+If a wheel is not available for your platform, `pip` will fall back to a source build. In that case you need a working C compiler toolchain (GCC/MinGW or MSVC).
 
 ```bash
 # Clone the repository
 git clone [https://github.com/ParjadM/Log-Quantum-Fractal-Tree-LQFT-.git](https://github.com/ParjadM/Log-Quantum-Fractal-Tree-LQFT-.git)
 cd Log-Quantum-Fractal-Tree-LQFT-
 
-# Build the native C-extension with highest hardware optimizations
+# Build the native C-extension locally
 python setup.py build_ext --inplace
 ```
 
-### The FFI Bridge (Python)
+### Python Wrapper
 
-The core engine handles massive state spaces seamlessly behind a high-level wrapper.
+The project is normally used through the wrapper, not by calling the C module directly.
 
 ```python
-import lqft_c_engine
+from lqft_engine import LQFT
 
-# High-Speed Zero-Copy Batching
-# Send raw C-arrays directly to the engine to bypass the GIL entirely
-lqft_c_engine.insert_batch_raw(bytes(raw_buffer_array), "enterprise_payload")
+lqft = LQFT()
+lqft.insert("alpha", "value-a")
+lqft.insert("beta", "value-b")
 
-# Native Search (throughput depends on workload/profile)
-result = lqft_c_engine.search(0x123456789ABCDEF)
+result = lqft.search("alpha")
+present = lqft.contains("beta")
 
-# Fetch internal hardware metrics
-metrics = lqft_c_engine.get_metrics()
-print(metrics['physical_nodes']) 
+metrics = lqft.get_stats()
+print(result, present, metrics["physical_nodes"])
 ```
 
-## ⚖️ License
+## License
 MIT License - Parjad Minooei (2026).

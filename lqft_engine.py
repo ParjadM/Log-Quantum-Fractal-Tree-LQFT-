@@ -1,5 +1,5 @@
+import importlib
 import os
-import sys
 import threading
 
 try:
@@ -14,12 +14,13 @@ except Exception:
 # Target: McMaster B.Tech / UofT MScAC Portfolio
 
 try:
-    import lqft_c_engine
-except ImportError:
-    print("\n[!] CRITICAL FATAL ERROR: Native C-Engine not found.")
-    print("[!] The LQFT is now a strictly native database. Pure Python fallback is disabled.")
-    print("[!] Run: python setup.py build_ext --inplace\n")
-    sys.exit(1)
+    lqft_c_engine = importlib.import_module("lqft_c_engine")
+except ImportError as exc:
+    raise ImportError(
+        "Native module 'lqft_c_engine' is unavailable. "
+        "Install a published wheel with 'pip install lqft-python-engine' or build the extension locally with "
+        "'python setup.py build_ext --inplace'."
+    ) from exc
 
 class LQFT:
     _instance_lock = threading.Lock()
@@ -37,11 +38,13 @@ class LQFT:
         "_native_delete_key",
         "_native_contains_key",
         "_native_bulk_insert_keys",
+        "_native_bulk_insert_key_values",
         "_native_bulk_contains_count",
         "_native_bulk_insert_range",
         "_native_bulk_contains_range_count",
         "_pending_keys",
         "_pending_value",
+        "_pending_values",
         "_pending_batch_size",
         "_use_prehash_fastpath",
         "_reads_sealed",
@@ -62,11 +65,13 @@ class LQFT:
         self._native_delete_key = getattr(lqft_c_engine, "delete_key", None)
         self._native_contains_key = getattr(lqft_c_engine, "contains_key", None)
         self._native_bulk_insert_keys = getattr(lqft_c_engine, "bulk_insert_keys", None)
+        self._native_bulk_insert_key_values = getattr(lqft_c_engine, "bulk_insert_key_values", None)
         self._native_bulk_contains_count = getattr(lqft_c_engine, "bulk_contains_count", None)
         self._native_bulk_insert_range = getattr(lqft_c_engine, "bulk_insert_range", None)
         self._native_bulk_contains_range_count = getattr(lqft_c_engine, "bulk_contains_range_count", None)
         self._pending_keys = []
         self._pending_value = None
+        self._pending_values = []
         self._pending_batch_size = 2048
         self._use_prehash_fastpath = False
         self._reads_sealed = False
@@ -106,8 +111,14 @@ class LQFT:
 
         keys = self._pending_keys
         value = self._pending_value
+        values = self._pending_values
         self._pending_keys = []
         self._pending_value = None
+        self._pending_values = []
+
+        if values and self._native_bulk_insert_key_values is not None:
+            self._native_bulk_insert_key_values(keys, values)
+            return
 
         if self._native_bulk_insert_keys is not None:
             self._native_bulk_insert_keys(keys, value)
@@ -235,6 +246,44 @@ class LQFT:
                 current_mb = self._current_memory_mb()
                 if current_mb >= self.max_memory_mb:
                     self.purge()
+
+        if self._native_bulk_insert_key_values is not None:
+            if self._pending_batch_size <= 1:
+                if self._native_insert_kv is not None and not self._use_prehash_fastpath:
+                    self._native_insert_kv(key, value)
+                    return
+                if self._use_prehash_fastpath:
+                    h = self._get_64bit_hash(key)
+                    lqft_c_engine.insert(h, value)
+                    return
+
+            if self._pending_values:
+                self._pending_keys.append(key)
+                self._pending_values.append(value)
+                if len(self._pending_keys) >= self._pending_batch_size:
+                    self._flush_pending_inserts()
+                return
+
+            if self._native_bulk_insert_keys is not None:
+                if self._pending_value is None:
+                    self._pending_value = value
+                    self._pending_keys.append(key)
+                elif value == self._pending_value:
+                    self._pending_keys.append(key)
+                else:
+                    self._pending_values = [self._pending_value] * len(self._pending_keys)
+                    self._pending_value = None
+                    self._pending_keys.append(key)
+                    self._pending_values.append(value)
+                if len(self._pending_keys) >= self._pending_batch_size:
+                    self._flush_pending_inserts()
+                return
+
+            self._pending_keys.append(key)
+            self._pending_values.append(value)
+            if len(self._pending_keys) >= self._pending_batch_size:
+                self._flush_pending_inserts()
+            return
 
         if self._native_bulk_insert_keys is not None:
             if self._pending_value is None:
