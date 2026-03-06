@@ -192,6 +192,60 @@ typedef struct LQFTNode {
     uint8_t child_count;
 } LQFTNode;
 
+typedef struct {
+    PyObject* key_obj;
+    PyObject* value_obj;
+    const char* key_utf8;
+    uint64_t hash;
+    Py_ssize_t key_len;
+    uint8_t fingerprint;
+    uint8_t state;
+} MutableEntry;
+
+typedef struct {
+    MutableEntry* table;
+    size_t capacity;
+    size_t size;
+    size_t used;
+    size_t tombstones;
+} MutableTable;
+
+typedef struct {
+    PyObject_HEAD
+    MutableTable table_state;
+} NativeMutableLQFTObject;
+
+static PyTypeObject NativeMutableLQFTType;
+
+#define MUTABLE_EMPTY 0
+#define MUTABLE_OCCUPIED 1
+#define MUTABLE_DELETED 2
+
+static void mutable_clear_all(MutableTable* table_state);
+static PyObject* mutable_build_metrics(MutableTable* table_state);
+static PyObject* mutable_export_items_from_table(MutableTable* table_state);
+static MutableEntry* mutable_lookup_entry(MutableTable* table_state, const char* key, Py_ssize_t key_len);
+static PyObject* method_mutable_new(PyObject* self, PyObject* args);
+static PyObject* method_mutable_insert_key_value(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_search_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_contains_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_delete_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_clear(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_len(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_get_metrics(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* method_mutable_export_items(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* native_mutable_new(PyTypeObject* type, PyObject* args, PyObject* kwds);
+static int native_mutable_init(NativeMutableLQFTObject* self, PyObject* args, PyObject* kwds);
+static void native_mutable_dealloc(NativeMutableLQFTObject* self);
+static PyObject* native_mutable_insert(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* native_mutable_search(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* native_mutable_contains(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* native_mutable_delete(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs);
+static PyObject* native_mutable_clear_method(NativeMutableLQFTObject* self, PyObject* args);
+static PyObject* native_mutable_get_metrics_method(NativeMutableLQFTObject* self, PyObject* args);
+static PyObject* native_mutable_export_items_method(NativeMutableLQFTObject* self, PyObject* args);
+static Py_ssize_t native_mutable_len(NativeMutableLQFTObject* self);
+
 // ===================================================================
 // THREAD-LOCAL ARENA ALLOCATOR (F-01/F-08 Stabilization)
 // ===================================================================
@@ -503,10 +557,10 @@ LQFTNode* create_node(void* value, uint32_t value_len, uint64_t key_hash, LQFTNo
 
 void decref(LQFTNode* start_node) {
     if (!start_node || start_node == TOMBSTONE) return;
-    int cap = 1024;
+    int cap = 64;
     int top = 0;
-    LQFTNode** cleanup_stack = (LQFTNode**)malloc((size_t)cap * sizeof(LQFTNode*));
-    if (!cleanup_stack) return;
+    LQFTNode* local_stack[64];
+    LQFTNode** cleanup_stack = local_stack;
     cleanup_stack[top++] = start_node;
     while (top > 0) {
         LQFTNode* node = cleanup_stack[--top];
@@ -521,9 +575,15 @@ void decref(LQFTNode* start_node) {
                 for (uint8_t i = 0; i < node->child_count; i++) {
                     if (top >= cap) {
                         int next_cap = cap * 2;
-                        LQFTNode** grown = (LQFTNode**)realloc(cleanup_stack, (size_t)next_cap * sizeof(LQFTNode*));
+                        LQFTNode** grown;
+                        if (cleanup_stack == local_stack) {
+                            grown = (LQFTNode**)malloc((size_t)next_cap * sizeof(LQFTNode*));
+                            if (grown) memcpy(grown, local_stack, (size_t)top * sizeof(LQFTNode*));
+                        } else {
+                            grown = (LQFTNode**)realloc(cleanup_stack, (size_t)next_cap * sizeof(LQFTNode*));
+                        }
                         if (!grown) {
-                            free(cleanup_stack);
+                            if (cleanup_stack != local_stack) free(cleanup_stack);
                             return;
                         }
                         cleanup_stack = grown;
@@ -560,7 +620,7 @@ void decref(LQFTNode* start_node) {
             get_my_metrics()->phys_freed++;
         }
     }
-    free(cleanup_stack);
+    if (cleanup_stack != local_stack) free(cleanup_stack);
 }
 
 static inline int node_matches_signature(const LQFTNode* node, const char* value_ptr, uint32_t value_len, uint64_t key_hash, LQFTNode** children) {
@@ -569,7 +629,7 @@ static inline int node_matches_signature(const LQFTNode* node, const char* value
     if (node->value_len != value_len) return 0;
 
     if ((node->value == NULL) != (value_ptr == NULL)) return 0;
-    if (node->value && value_ptr && node->value != (const void*)value_ptr && strcmp((const char*)node->value, value_ptr) != 0) return 0;
+    if (node->value && value_ptr && node->value != (const void*)value_ptr && memcmp((const char*)node->value, value_ptr, (size_t)value_len) != 0) return 0;
 
     uint32_t child_bitmap = 0;
     uint8_t child_count = 0;
@@ -801,17 +861,17 @@ static inline uint64_t hash_key_bytes(const char* key_str, Py_ssize_t key_len) {
     return h;
 }
 
-static THREAD_LOCAL const char* tls_last_key_ptr = NULL;
-static THREAD_LOCAL Py_ssize_t tls_last_key_len = -1;
+static THREAD_LOCAL PyObject* tls_last_key_obj = NULL;
 static THREAD_LOCAL uint64_t tls_last_key_hash = 0;
 
-static inline uint64_t hash_key_utf8_cached(const char* key_str, Py_ssize_t key_len) {
-    if (key_str == tls_last_key_ptr && key_len == tls_last_key_len) {
+static inline uint64_t hash_key_unicode_cached(PyObject* key_obj, const char* key_str, Py_ssize_t key_len) {
+    if (key_obj == tls_last_key_obj) {
         return tls_last_key_hash;
     }
     uint64_t h = hash_key_bytes(key_str, key_len);
-    tls_last_key_ptr = key_str;
-    tls_last_key_len = key_len;
+    Py_INCREF(key_obj);
+    Py_XDECREF(tls_last_key_obj);
+    tls_last_key_obj = key_obj;
     tls_last_key_hash = h;
     return h;
 }
@@ -830,6 +890,36 @@ static inline uint64_t fnv1a_update_u64_decimal(uint64_t hash, uint64_t value) {
         hash *= FNV_PRIME;
     }
     return hash;
+}
+
+static inline uint64_t build_leaf_prefix_hash(const char* val_str, uint32_t val_len) {
+    uint64_t pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
+    return fnv1a_update(pre, val_str, val_len);
+}
+
+static void c_internal_insert_rw_precomputed(uint64_t h, const char* val_str, uint64_t pre, uint64_t val_hash, uint32_t val_len) {
+    ThreadMetrics* metrics = get_my_metrics();
+    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+    metrics->logical_inserts++;
+    while (1) {
+        LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+        LQFTNode* old_root = global_roots[shard].root;
+        if (old_root) ATOMIC_INC(&old_root->ref_count);
+        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+        LQFTNode* next = core_insert_internal(h, val_str, val_hash, val_len, old_root, pre);
+        LQFT_RWLOCK_WRLOCK(&root_locks[shard].lock);
+        if (global_roots[shard].root == old_root) {
+            global_roots[shard].root = next;
+            LQFT_RWLOCK_UNLOCK_WR(&root_locks[shard].lock);
+            if (old_root) { decref(old_root); decref(old_root); }
+            break;
+        } else {
+            LQFT_RWLOCK_UNLOCK_WR(&root_locks[shard].lock);
+            if (next) decref(next);
+            if (old_root) decref(old_root);
+            for(volatile int s = 0; s < 16; s++) { CPU_PAUSE; }
+        }
+    }
 }
 
 static void c_internal_insert_rw(uint64_t h, const char* val_str) {
@@ -856,28 +946,7 @@ static void c_internal_insert_rw(uint64_t h, const char* val_str) {
         last_val_hash = val_hash;
         last_val_len = val_len;
     }
-    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-    get_my_metrics()->logical_inserts++;
-    int spin = 0;
-    while (1) {
-        LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-        LQFTNode* old_root = global_roots[shard].root;
-        if (old_root) ATOMIC_INC(&old_root->ref_count);
-        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
-        LQFTNode* next = core_insert_internal(h, val_str, val_hash, val_len, old_root, pre);
-        LQFT_RWLOCK_WRLOCK(&root_locks[shard].lock);
-        if (global_roots[shard].root == old_root) {
-            global_roots[shard].root = next;
-            LQFT_RWLOCK_UNLOCK_WR(&root_locks[shard].lock);
-            if (old_root) { decref(old_root); decref(old_root); }
-            break;
-        } else {
-            LQFT_RWLOCK_UNLOCK_WR(&root_locks[shard].lock);
-            if (next) decref(next);
-            if (old_root) decref(old_root); 
-            for(volatile int s = 0; s < 16; s++) { CPU_PAUSE; }
-        }
-    }
+    c_internal_insert_rw_precomputed(h, val_str, pre, val_hash, val_len);
 }
 
 typedef struct {
@@ -989,10 +1058,14 @@ static PyObject* method_insert(PyObject* self, PyObject* const* args, Py_ssize_t
         return NULL;
     }
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
-    const char* val_str = PyUnicode_AsUTF8(args[1]);
+    Py_ssize_t val_len_ssize = 0;
+    const char* val_str = PyUnicode_AsUTF8AndSize(args[1], &val_len_ssize);
     if (!val_str) return NULL;
+    uint32_t val_len = (uint32_t)val_len_ssize;
+    uint64_t val_hash = hash_bytes_64(val_str, val_len);
+    uint64_t pre = build_leaf_prefix_hash(val_str, val_len);
     Py_BEGIN_ALLOW_THREADS
-    c_internal_insert_rw(h, val_str);
+    c_internal_insert_rw_precomputed(h, val_str, pre, val_hash, val_len);
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
@@ -1005,11 +1078,15 @@ static PyObject* method_insert_key_value(PyObject* self, PyObject* const* args, 
     }
     Py_ssize_t key_len = 0;
     const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
-    const char* val_str = PyUnicode_AsUTF8(args[1]);
+    Py_ssize_t val_len_ssize = 0;
+    const char* val_str = PyUnicode_AsUTF8AndSize(args[1], &val_len_ssize);
     if (!key_str || !val_str) return NULL;
-    uint64_t h = hash_key_utf8_cached(key_str, key_len);
+    uint64_t h = hash_key_unicode_cached(args[0], key_str, key_len);
+    uint32_t val_len = (uint32_t)val_len_ssize;
+    uint64_t val_hash = hash_bytes_64(val_str, val_len);
+    uint64_t pre = build_leaf_prefix_hash(val_str, val_len);
     Py_BEGIN_ALLOW_THREADS
-    c_internal_insert_rw(h, val_str);
+    c_internal_insert_rw_precomputed(h, val_str, pre, val_hash, val_len);
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
@@ -1018,6 +1095,10 @@ static THREAD_LOCAL uint64_t* tls_bulk_hashes = NULL;
 static THREAD_LOCAL Py_ssize_t tls_bulk_hashes_cap = 0;
 static THREAD_LOCAL const char** tls_bulk_values = NULL;
 static THREAD_LOCAL Py_ssize_t tls_bulk_values_cap = 0;
+static THREAD_LOCAL uint64_t* tls_bulk_value_hashes = NULL;
+static THREAD_LOCAL uint64_t* tls_bulk_value_prefixes = NULL;
+static THREAD_LOCAL uint32_t* tls_bulk_value_lens = NULL;
+static THREAD_LOCAL Py_ssize_t tls_bulk_value_meta_cap = 0;
 
 static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 2) return NULL;
@@ -1028,11 +1109,15 @@ static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, 
     PyObject* seq = PySequence_Fast(args[0], "bulk_insert_keys expects a sequence of string keys");
     if (!seq) return NULL;
 
-    const char* val_str = PyUnicode_AsUTF8(args[1]);
+    Py_ssize_t val_len_ssize = 0;
+    const char* val_str = PyUnicode_AsUTF8AndSize(args[1], &val_len_ssize);
     if (!val_str) {
         Py_DECREF(seq);
         return NULL;
     }
+    uint32_t val_len = (uint32_t)val_len_ssize;
+    uint64_t val_hash = hash_bytes_64(val_str, val_len);
+    uint64_t pre = build_leaf_prefix_hash(val_str, val_len);
 
     Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
     if (n <= 0) {
@@ -1063,7 +1148,7 @@ static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, 
 
     Py_BEGIN_ALLOW_THREADS
     for (Py_ssize_t i = 0; i < n; i++) {
-        c_internal_insert_rw(hashes[i], val_str);
+        c_internal_insert_rw_precomputed(hashes[i], val_str, pre, val_hash, val_len);
     }
     Py_END_ALLOW_THREADS
 
@@ -1119,15 +1204,43 @@ static PyObject* method_bulk_insert_key_values(PyObject* self, PyObject* const* 
         tls_bulk_values = grown;
         tls_bulk_values_cap = n;
     }
+    if (n > tls_bulk_value_meta_cap) {
+        uint64_t* grown_hashes = (uint64_t*)realloc(tls_bulk_value_hashes, (size_t)n * sizeof(uint64_t));
+        if (!grown_hashes) {
+            Py_DECREF(key_seq);
+            Py_DECREF(value_seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_value_hashes = grown_hashes;
+        uint64_t* grown_prefixes = (uint64_t*)realloc(tls_bulk_value_prefixes, (size_t)n * sizeof(uint64_t));
+        if (!grown_prefixes) {
+            Py_DECREF(key_seq);
+            Py_DECREF(value_seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_value_prefixes = grown_prefixes;
+        uint32_t* grown_lens = (uint32_t*)realloc(tls_bulk_value_lens, (size_t)n * sizeof(uint32_t));
+        if (!grown_lens) {
+            Py_DECREF(key_seq);
+            Py_DECREF(value_seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_value_lens = grown_lens;
+        tls_bulk_value_meta_cap = n;
+    }
 
     uint64_t* hashes = tls_bulk_hashes;
     const char** values = tls_bulk_values;
+    uint64_t* value_hashes = tls_bulk_value_hashes;
+    uint64_t* value_prefixes = tls_bulk_value_prefixes;
+    uint32_t* value_lens = tls_bulk_value_lens;
     PyObject** key_items = PySequence_Fast_ITEMS(key_seq);
     PyObject** value_items = PySequence_Fast_ITEMS(value_seq);
     for (Py_ssize_t i = 0; i < n; i++) {
         Py_ssize_t key_len = 0;
+        Py_ssize_t value_len_ssize = 0;
         const char* key_str = PyUnicode_AsUTF8AndSize(key_items[i], &key_len);
-        const char* value_str = PyUnicode_AsUTF8(value_items[i]);
+        const char* value_str = PyUnicode_AsUTF8AndSize(value_items[i], &value_len_ssize);
         if (!key_str || !value_str) {
             Py_DECREF(key_seq);
             Py_DECREF(value_seq);
@@ -1135,11 +1248,14 @@ static PyObject* method_bulk_insert_key_values(PyObject* self, PyObject* const* 
         }
         hashes[i] = hash_key_bytes(key_str, key_len);
         values[i] = value_str;
+        value_lens[i] = (uint32_t)value_len_ssize;
+        value_hashes[i] = hash_bytes_64(value_str, value_lens[i]);
+        value_prefixes[i] = build_leaf_prefix_hash(value_str, value_lens[i]);
     }
 
     Py_BEGIN_ALLOW_THREADS
     for (Py_ssize_t i = 0; i < n; i++) {
-        c_internal_insert_rw(hashes[i], values[i]);
+        c_internal_insert_rw_precomputed(hashes[i], values[i], value_prefixes[i], value_hashes[i], value_lens[i]);
     }
     Py_END_ALLOW_THREADS
 
@@ -1160,15 +1276,19 @@ static PyObject* method_bulk_insert_range(PyObject* self, PyObject* const* args,
     if (PyErr_Occurred()) return NULL;
     unsigned long long count = PyLong_AsUnsignedLongLong(args[2]);
     if (PyErr_Occurred()) return NULL;
-    const char* val_str = PyUnicode_AsUTF8(args[3]);
+    Py_ssize_t val_len_ssize = 0;
+    const char* val_str = PyUnicode_AsUTF8AndSize(args[3], &val_len_ssize);
     if (!val_str) return NULL;
+    uint32_t val_len = (uint32_t)val_len_ssize;
+    uint64_t val_hash = hash_bytes_64(val_str, val_len);
+    uint64_t pre = build_leaf_prefix_hash(val_str, val_len);
 
     uint64_t prefix_hash = fnv1a_update(FNV_OFFSET_BASIS, prefix, strlen(prefix));
 
     Py_BEGIN_ALLOW_THREADS
     for (unsigned long long i = 0; i < count; i++) {
         uint64_t h = fnv1a_update_u64_decimal(prefix_hash, (uint64_t)(start + i));
-        c_internal_insert_rw(h, val_str);
+        c_internal_insert_rw_precomputed(h, val_str, pre, val_hash, val_len);
     }
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
@@ -1178,33 +1298,24 @@ static PyObject* method_search(PyObject* self, PyObject* const* args, Py_ssize_t
     if (nargs != 1) return NULL;
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-    const char* result_ptr = NULL;
-    LQFTNode* current_root = NULL;
+    PyObject* py_res = NULL;
     if (global_reads_sealed) {
-        current_root = global_roots[shard].root;
+        LQFTNode* current_root = global_roots[shard].root;
+        const char* result_ptr = NULL;
         if (current_root) result_ptr = core_search(h, current_root);
         if (result_ptr) return PyUnicode_FromString(result_ptr);
         Py_RETURN_NONE;
     }
 
-    Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-    current_root = global_roots[shard].root;
-    if (current_root) ATOMIC_INC(&current_root->ref_count);
+    LQFTNode* current_root = global_roots[shard].root;
+    if (current_root) {
+        const char* result_ptr = core_search(h, current_root);
+        if (result_ptr) py_res = PyUnicode_FromString(result_ptr);
+    }
     LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
-    if (current_root) {
-        result_ptr = core_search(h, current_root);
-    }
-    Py_END_ALLOW_THREADS
 
-    if (current_root) {
-        PyObject* py_res = NULL;
-        if (result_ptr) {
-            py_res = PyUnicode_FromString(result_ptr);
-        }
-        decref(current_root);
-        if (py_res) return py_res;
-    }
+    if (py_res) return py_res;
 
     Py_RETURN_NONE;
 }
@@ -1214,35 +1325,26 @@ static PyObject* method_search_key(PyObject* self, PyObject* const* args, Py_ssi
     Py_ssize_t key_len = 0;
     const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     if (!key_str) return NULL;
-    uint64_t h = hash_key_utf8_cached(key_str, key_len);
+    uint64_t h = hash_key_unicode_cached(args[0], key_str, key_len);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-    const char* result_ptr = NULL;
-    LQFTNode* current_root = NULL;
+    PyObject* py_res = NULL;
     if (global_reads_sealed) {
-        current_root = global_roots[shard].root;
+        LQFTNode* current_root = global_roots[shard].root;
+        const char* result_ptr = NULL;
         if (current_root) result_ptr = core_search(h, current_root);
         if (result_ptr) return PyUnicode_FromString(result_ptr);
         Py_RETURN_NONE;
     }
 
-    Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-    current_root = global_roots[shard].root;
-    if (current_root) ATOMIC_INC(&current_root->ref_count);
+    LQFTNode* current_root = global_roots[shard].root;
+    if (current_root) {
+        const char* result_ptr = core_search(h, current_root);
+        if (result_ptr) py_res = PyUnicode_FromString(result_ptr);
+    }
     LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
-    if (current_root) {
-        result_ptr = core_search(h, current_root);
-    }
-    Py_END_ALLOW_THREADS
 
-    if (current_root) {
-        PyObject* py_res = NULL;
-        if (result_ptr) {
-            py_res = PyUnicode_FromString(result_ptr);
-        }
-        decref(current_root);
-        if (py_res) return py_res;
-    }
+    if (py_res) return py_res;
 
     Py_RETURN_NONE;
 }
@@ -1276,7 +1378,7 @@ static PyObject* method_contains_key(PyObject* self, PyObject* const* args, Py_s
     Py_ssize_t key_len = 0;
     const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     if (!key_str) return NULL;
-    uint64_t h = hash_key_utf8_cached(key_str, key_len);
+    uint64_t h = hash_key_unicode_cached(args[0], key_str, key_len);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     int found = 0;
     if (global_reads_sealed) {
@@ -1450,7 +1552,7 @@ static PyObject* method_delete_key(PyObject* self, PyObject* const* args, Py_ssi
     Py_ssize_t key_len = 0;
     const char* key_str = PyUnicode_AsUTF8AndSize(args[0], &key_len);
     if (!key_str) return NULL;
-    uint64_t h = hash_key_utf8_cached(key_str, key_len);
+    uint64_t h = hash_key_unicode_cached(args[0], key_str, key_len);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     Py_BEGIN_ALLOW_THREADS
     while(1) {
@@ -1568,6 +1670,15 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
 }
 
 static PyMethodDef LQFTMethods[] = {
+    {"mutable_new", method_mutable_new, METH_NOARGS, "Create native mutable hash table state"},
+    {"mutable_insert_key_value", (PyCFunction)method_mutable_insert_key_value, METH_FASTCALL, "Insert into native mutable hash table"},
+    {"mutable_search_key", (PyCFunction)method_mutable_search_key, METH_FASTCALL, "Search native mutable hash table by string key"},
+    {"mutable_contains_key", (PyCFunction)method_mutable_contains_key, METH_FASTCALL, "Contains check in native mutable hash table"},
+    {"mutable_delete_key", (PyCFunction)method_mutable_delete_key, METH_FASTCALL, "Delete from native mutable hash table"},
+    {"mutable_clear", (PyCFunction)method_mutable_clear, METH_FASTCALL, "Clear native mutable hash table"},
+    {"mutable_len", (PyCFunction)method_mutable_len, METH_FASTCALL, "Length of native mutable hash table"},
+    {"mutable_get_metrics", (PyCFunction)method_mutable_get_metrics, METH_FASTCALL, "Metrics for native mutable hash table"},
+    {"mutable_export_items", (PyCFunction)method_mutable_export_items, METH_FASTCALL, "Export native mutable hash table items"},
     {"insert", (PyCFunction)method_insert, METH_FASTCALL, "Fast-path insert single key"},
     {"insert_key_value", (PyCFunction)method_insert_key_value, METH_FASTCALL, "Insert using string key/value fast path"},
     {"bulk_insert_keys", (PyCFunction)method_bulk_insert_keys, METH_FASTCALL, "Bulk insert string keys with one value"},
@@ -1591,6 +1702,7 @@ static PyMethodDef LQFTMethods[] = {
 static struct PyModuleDef lqftmodule = { PyModuleDef_HEAD_INIT, "lqft_c_engine", NULL, -1, LQFTMethods };
 
 PyMODINIT_FUNC PyInit_lqft_c_engine(void) { 
+    PyObject* module;
     for(int i = 0; i < NUM_ROOTS; i++) {
         global_roots[i].root = NULL;
         LQFT_RWLOCK_INIT(&root_locks[i].lock);
@@ -1608,7 +1720,16 @@ PyMODINIT_FUNC PyInit_lqft_c_engine(void) {
 #else
     pthread_t bg_tid; pthread_create(&bg_tid, NULL, background_alloc_thread, NULL); pthread_detach(bg_tid); 
 #endif
-    return PyModule_Create(&lqftmodule); 
+    if (PyType_Ready(&NativeMutableLQFTType) < 0) return NULL;
+    module = PyModule_Create(&lqftmodule);
+    if (!module) return NULL;
+    Py_INCREF(&NativeMutableLQFTType);
+    if (PyModule_AddObject(module, "NativeMutableLQFT", (PyObject*)&NativeMutableLQFTType) < 0) {
+        Py_DECREF(&NativeMutableLQFTType);
+        Py_DECREF(module);
+        return NULL;
+    }
+    return module; 
 }
 
 static const char* value_acquire(const char* value_ptr, uint64_t value_hash, uint32_t value_len) {
@@ -1693,3 +1814,439 @@ static void value_pool_clear_all(void) {
     value_pool_entry_count = 0;
     value_pool_total_bytes = 0;
 }
+
+static inline char* copy_bytes_with_nul(const char* src, Py_ssize_t len) {
+    char* dst = (char*)malloc((size_t)len + 1u);
+    if (!dst) return NULL;
+    memcpy(dst, src, (size_t)len);
+    dst[len] = '\0';
+    return dst;
+}
+
+static inline size_t mutable_next_pow2(size_t value) {
+    size_t cap = 1024;
+    while (cap < value) cap <<= 1;
+    return cap;
+}
+
+#define MUTABLE_TABLE_CAPSULE_NAME "lqft_c_engine.MutableTable"
+
+static MutableTable* mutable_table_from_capsule(PyObject* capsule) {
+    return (MutableTable*)PyCapsule_GetPointer(capsule, MUTABLE_TABLE_CAPSULE_NAME);
+}
+
+static void mutable_table_capsule_destructor(PyObject* capsule) {
+    MutableTable* table_state = mutable_table_from_capsule(capsule);
+    if (!table_state) {
+        PyErr_Clear();
+        return;
+    }
+    mutable_clear_all(table_state);
+    free(table_state);
+}
+
+static inline void mutable_entry_reset(MutableEntry* entry) {
+    entry->key_obj = NULL;
+    entry->value_obj = NULL;
+    entry->key_utf8 = NULL;
+    entry->hash = 0;
+    entry->key_len = 0;
+    entry->fingerprint = 0;
+    entry->state = MUTABLE_EMPTY;
+}
+
+static inline void mutable_entry_release(MutableEntry* entry) {
+    if (entry->state == MUTABLE_OCCUPIED) {
+        Py_DECREF(entry->key_obj);
+        Py_DECREF(entry->value_obj);
+    }
+    entry->key_obj = NULL;
+    entry->value_obj = NULL;
+    entry->key_utf8 = NULL;
+    entry->hash = 0;
+    entry->key_len = 0;
+    entry->fingerprint = 0;
+}
+
+static inline uint8_t mutable_hash_fingerprint(uint64_t hash) {
+    uint8_t fp = (uint8_t)((hash >> 57) & 0x7Fu);
+    return (uint8_t)(fp + 1u);
+}
+
+static size_t mutable_find_slot(MutableEntry* table, size_t capacity, const char* key, Py_ssize_t key_len, uint64_t hash, int* found) {
+    size_t mask = capacity - 1u;
+    size_t idx = (size_t)hash & mask;
+    size_t first_deleted = (size_t)-1;
+    uint8_t fingerprint = mutable_hash_fingerprint(hash);
+    for (;;) {
+        MutableEntry* entry = &table[idx];
+        if (entry->state == MUTABLE_EMPTY) {
+            *found = 0;
+            return first_deleted != (size_t)-1 ? first_deleted : idx;
+        }
+        if (entry->state == MUTABLE_DELETED) {
+            if (first_deleted == (size_t)-1) first_deleted = idx;
+        } else if (entry->fingerprint == fingerprint && entry->hash == hash && entry->key_len == key_len && memcmp(entry->key_utf8, key, (size_t)key_len) == 0) {
+            *found = 1;
+            return idx;
+        }
+        idx = (idx + 1u) & mask;
+    }
+}
+
+static inline size_t mutable_probe_distance(size_t slot, size_t home, size_t mask) {
+    return (slot - home) & mask;
+}
+
+static int mutable_resize(MutableTable* table_state, size_t min_capacity) {
+    size_t new_capacity = mutable_next_pow2(min_capacity);
+    MutableEntry* new_table = (MutableEntry*)calloc(new_capacity, sizeof(MutableEntry));
+    if (!new_table) return -1;
+
+    if (table_state->table) {
+        for (size_t i = 0; i < table_state->capacity; i++) {
+            MutableEntry* entry = &table_state->table[i];
+            if (entry->state != MUTABLE_OCCUPIED) continue;
+            int found = 0;
+            size_t idx = mutable_find_slot(new_table, new_capacity, entry->key_utf8, entry->key_len, entry->hash, &found);
+            MutableEntry* dst = &new_table[idx];
+            *dst = *entry;
+        }
+        free(table_state->table);
+    }
+
+    table_state->table = new_table;
+    table_state->capacity = new_capacity;
+    table_state->used = table_state->size;
+    table_state->tombstones = 0;
+    return 0;
+}
+
+static void mutable_delete_entry_at(MutableTable* table_state, MutableEntry* entry) {
+    size_t mask = table_state->capacity - 1u;
+    size_t hole = (size_t)(entry - table_state->table);
+    size_t scan = (hole + 1u) & mask;
+
+    mutable_entry_release(entry);
+    table_state->size--;
+
+    while (table_state->table[scan].state == MUTABLE_OCCUPIED) {
+        MutableEntry* current = &table_state->table[scan];
+        size_t home = (size_t)current->hash & mask;
+        size_t current_distance = mutable_probe_distance(scan, home, mask);
+        size_t hole_distance = mutable_probe_distance(hole, home, mask);
+
+        if (hole_distance < current_distance) {
+            table_state->table[hole] = *current;
+            mutable_entry_reset(current);
+            hole = scan;
+        }
+        scan = (scan + 1u) & mask;
+    }
+
+    mutable_entry_reset(&table_state->table[hole]);
+    table_state->used--;
+    table_state->tombstones = 0;
+}
+
+static int mutable_ensure_capacity(MutableTable* table_state, size_t extra) {
+    if (table_state->capacity == 0) {
+        return mutable_resize(table_state, 1024);
+    }
+    size_t required_used = table_state->used + extra;
+    if (required_used * 10u < table_state->capacity * 7u) return 0;
+    return mutable_resize(table_state, table_state->capacity << 1u);
+}
+
+static void mutable_clear_all(MutableTable* table_state) {
+    if (!table_state || !table_state->table) return;
+    for (size_t i = 0; i < table_state->capacity; i++) {
+        mutable_entry_release(&table_state->table[i]);
+    }
+    free(table_state->table);
+    table_state->table = NULL;
+    table_state->capacity = 0;
+    table_state->size = 0;
+    table_state->used = 0;
+    table_state->tombstones = 0;
+}
+
+static PyObject* mutable_build_metrics(MutableTable* table_state) {
+    return Py_BuildValue(
+        "{s:n, s:n, s:s, s:n, s:n}",
+        "logical_inserts", (Py_ssize_t)table_state->size,
+        "physical_nodes", (Py_ssize_t)table_state->size,
+        "frontend", "native-mutable-hashtable",
+        "mutable_capacity", (Py_ssize_t)table_state->capacity,
+        "mutable_tombstones", (Py_ssize_t)table_state->tombstones
+    );
+}
+
+static PyObject* mutable_export_items_from_table(MutableTable* table_state) {
+    PyObject* keys = PyList_New((Py_ssize_t)table_state->size);
+    if (!keys) return NULL;
+    PyObject* values = PyList_New((Py_ssize_t)table_state->size);
+    if (!values) {
+        Py_DECREF(keys);
+        return NULL;
+    }
+    Py_ssize_t out_idx = 0;
+    for (size_t i = 0; i < table_state->capacity; i++) {
+        MutableEntry* entry = &table_state->table[i];
+        if (entry->state != MUTABLE_OCCUPIED) continue;
+        PyObject* py_key = Py_NewRef(entry->key_obj);
+        PyObject* py_value = Py_NewRef(entry->value_obj);
+        if (!py_key || !py_value) {
+            Py_XDECREF(py_key);
+            Py_XDECREF(py_value);
+            Py_DECREF(keys);
+            Py_DECREF(values);
+            return NULL;
+        }
+        PyList_SET_ITEM(keys, out_idx, py_key);
+        PyList_SET_ITEM(values, out_idx, py_value);
+        out_idx++;
+    }
+    return Py_BuildValue("NN", keys, values);
+}
+
+static int mutable_insert_object(MutableTable* table_state, PyObject* key_obj, const char* key, Py_ssize_t key_len, PyObject* value_obj) {
+    uint64_t hash = hash_key_bytes(key, key_len);
+    if (mutable_ensure_capacity(table_state, 1) != 0) return -1;
+    int found = 0;
+    size_t idx = mutable_find_slot(table_state->table, table_state->capacity, key, key_len, hash, &found);
+    MutableEntry* entry = &table_state->table[idx];
+    Py_INCREF(value_obj);
+
+    if (found) {
+        Py_DECREF(entry->value_obj);
+        entry->value_obj = value_obj;
+        return 0;
+    }
+
+    Py_INCREF(key_obj);
+
+    if (entry->state == MUTABLE_EMPTY) table_state->used++;
+    entry->key_obj = key_obj;
+    entry->value_obj = value_obj;
+    entry->key_utf8 = key;
+    entry->hash = hash;
+    entry->key_len = key_len;
+    entry->fingerprint = mutable_hash_fingerprint(hash);
+    entry->state = MUTABLE_OCCUPIED;
+    table_state->size++;
+    return 0;
+}
+
+static PyObject* native_mutable_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
+    NativeMutableLQFTObject* self = (NativeMutableLQFTObject*)type->tp_alloc(type, 0);
+    if (!self) return NULL;
+    memset(&self->table_state, 0, sizeof(self->table_state));
+    return (PyObject*)self;
+}
+
+static int native_mutable_init(NativeMutableLQFTObject* self, PyObject* args, PyObject* kwds) {
+    return 0;
+}
+
+static void native_mutable_dealloc(NativeMutableLQFTObject* self) {
+    mutable_clear_all(&self->table_state);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject* native_mutable_insert(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[0], &key_len);
+    if (!key) return NULL;
+    if (!PyUnicode_Check(args[1])) {
+        PyErr_Format(PyExc_TypeError, "LQFT values must be strings. Received: %s", Py_TYPE(args[1])->tp_name);
+        return NULL;
+    }
+    if (mutable_insert_object(&self->table_state, args[0], key, key_len, args[1]) != 0) return PyErr_NoMemory();
+    Py_RETURN_NONE;
+}
+
+static PyObject* native_mutable_search(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[0], &key_len);
+    if (!key) return NULL;
+    MutableEntry* entry = mutable_lookup_entry(&self->table_state, key, key_len);
+    if (!entry) Py_RETURN_NONE;
+    return Py_NewRef(entry->value_obj);
+}
+
+static PyObject* native_mutable_contains(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[0], &key_len);
+    if (!key) return NULL;
+    if (mutable_lookup_entry(&self->table_state, key, key_len)) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject* native_mutable_delete(NativeMutableLQFTObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[0], &key_len);
+    if (!key) return NULL;
+    MutableEntry* entry = mutable_lookup_entry(&self->table_state, key, key_len);
+    if (entry) mutable_delete_entry_at(&self->table_state, entry);
+    Py_RETURN_NONE;
+}
+
+static PyObject* native_mutable_clear_method(NativeMutableLQFTObject* self, PyObject* args) {
+    mutable_clear_all(&self->table_state);
+    Py_RETURN_NONE;
+}
+
+static PyObject* native_mutable_get_metrics_method(NativeMutableLQFTObject* self, PyObject* args) {
+    return mutable_build_metrics(&self->table_state);
+}
+
+static PyObject* native_mutable_export_items_method(NativeMutableLQFTObject* self, PyObject* args) {
+    return mutable_export_items_from_table(&self->table_state);
+}
+
+static Py_ssize_t native_mutable_len(NativeMutableLQFTObject* self) {
+    return (Py_ssize_t)self->table_state.size;
+}
+
+static MutableEntry* mutable_lookup_entry(MutableTable* table_state, const char* key, Py_ssize_t key_len) {
+    if (!table_state || !table_state->table || table_state->capacity == 0) return NULL;
+    int found = 0;
+    size_t idx = mutable_find_slot(table_state->table, table_state->capacity, key, key_len, hash_key_bytes(key, key_len), &found);
+    return found ? &table_state->table[idx] : NULL;
+}
+
+static PyObject* method_mutable_new(PyObject* self, PyObject* args) {
+    MutableTable* table_state = (MutableTable*)calloc(1, sizeof(MutableTable));
+    if (!table_state) return PyErr_NoMemory();
+    PyObject* capsule = PyCapsule_New(table_state, MUTABLE_TABLE_CAPSULE_NAME, mutable_table_capsule_destructor);
+    if (!capsule) {
+        free(table_state);
+        return NULL;
+    }
+    return capsule;
+}
+
+static PyObject* method_mutable_insert_key_value(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 3) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[1], &key_len);
+    if (!key) return NULL;
+    if (!PyUnicode_Check(args[2])) {
+        PyErr_Format(PyExc_TypeError, "LQFT values must be strings. Received: %s", Py_TYPE(args[2])->tp_name);
+        return NULL;
+    }
+    if (mutable_insert_object(table_state, args[1], key, key_len, args[2]) != 0) return PyErr_NoMemory();
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_mutable_search_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[1], &key_len);
+    if (!key) return NULL;
+    MutableEntry* entry = mutable_lookup_entry(table_state, key, key_len);
+    if (!entry) Py_RETURN_NONE;
+    return Py_NewRef(entry->value_obj);
+}
+
+static PyObject* method_mutable_contains_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[1], &key_len);
+    if (!key) return NULL;
+    if (mutable_lookup_entry(table_state, key, key_len)) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject* method_mutable_delete_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    Py_ssize_t key_len = 0;
+    const char* key = PyUnicode_AsUTF8AndSize(args[1], &key_len);
+    if (!key) return NULL;
+    MutableEntry* entry = mutable_lookup_entry(table_state, key, key_len);
+    if (entry) {
+        mutable_delete_entry_at(table_state, entry);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_mutable_clear(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    mutable_clear_all(table_state);
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_mutable_len(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    return PyLong_FromSize_t(table_state->size);
+}
+
+static PyObject* method_mutable_get_metrics(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    return mutable_build_metrics(table_state);
+}
+
+static PyObject* method_mutable_export_items(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    MutableTable* table_state = mutable_table_from_capsule(args[0]);
+    if (!table_state) return NULL;
+    return mutable_export_items_from_table(table_state);
+}
+
+static PyMethodDef NativeMutableLQFTMethods[] = {
+    {"insert", (PyCFunction)native_mutable_insert, METH_FASTCALL, "Insert key/value into native mutable hash table"},
+    {"search", (PyCFunction)native_mutable_search, METH_FASTCALL, "Search key in native mutable hash table"},
+    {"contains", (PyCFunction)native_mutable_contains, METH_FASTCALL, "Contains check in native mutable hash table"},
+    {"remove", (PyCFunction)native_mutable_delete, METH_FASTCALL, "Delete key from native mutable hash table"},
+    {"delete", (PyCFunction)native_mutable_delete, METH_FASTCALL, "Delete key from native mutable hash table"},
+    {"clear", (PyCFunction)native_mutable_clear_method, METH_NOARGS, "Clear native mutable hash table"},
+    {"get_metrics", (PyCFunction)native_mutable_get_metrics_method, METH_NOARGS, "Metrics for native mutable hash table"},
+    {"export_items", (PyCFunction)native_mutable_export_items_method, METH_NOARGS, "Export native mutable hash table items"},
+    {NULL, NULL, 0, NULL}
+};
+
+static PySequenceMethods NativeMutableLQFTSequenceMethods = {
+    (lenfunc)native_mutable_len,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+};
+
+static PyTypeObject NativeMutableLQFTType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "lqft_c_engine.NativeMutableLQFT",
+    .tp_basicsize = sizeof(NativeMutableLQFTObject),
+    .tp_itemsize = 0,
+    .tp_dealloc = (destructor)native_mutable_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_doc = "Native mutable LQFT hash table",
+    .tp_methods = NativeMutableLQFTMethods,
+    .tp_as_sequence = &NativeMutableLQFTSequenceMethods,
+    .tp_init = (initproc)native_mutable_init,
+    .tp_new = native_mutable_new,
+};

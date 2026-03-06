@@ -13,29 +13,31 @@ The **Log-Quantum Fractal Tree (LQFT)** is a native Python extension that combin
 
 ---
 
-## Release Note (v1.1.5)
+## Release Note (v1.1.6)
 
-This release keeps the paired key/value batching patch.
+This release keeps the paired key/value batching patch, the native mutable frontend improvements, and tightens the public Python API to two supported models: `LQFT` and `MutableLQFT`.
 
 What improved:
 
-- Unique-value write throughput improved materially versus the previous local baseline.
-- The improvement is strongest in pure-write workloads, especially at 4 and 8 threads.
+- `MutableLQFT` moved materially closer to Python `dict` in write-heavy, mixed, and churn-heavy workloads.
+- The persistent `LQFT` wrapper kept improving in native-backed write and read paths.
+- The public package surface is now intentionally limited to the two documented models.
 
 What did not improve:
 
 - LQFT is still not generally competitive with Python dict or straightforward hash-table implementations.
 - Read-heavy workloads are still weaker than mainstream alternatives.
-- Mixed workloads improved only slightly or remained benchmark-dependent.
+- Some results remain benchmark-dependent, especially persistent unique-insert throughput.
 
 Practical claim for this release:
 
-- v1.1.5 is a better write-heavy LQFT than v1.0.9.
-- v1.1.5 is not a proof that LQFT beats common in-memory data structures overall.
+- v1.1.6 exposes two intended user-facing models: `LQFT` and `MutableLQFT`.
+- v1.1.6 is a substantially better mutable/write-heavy LQFT than earlier releases.
+- v1.1.6 is not a proof that LQFT beats common in-memory data structures overall.
 
 ---
 
-## Performance Snapshot (v1.1.5)
+## Performance Snapshot (v1.1.6)
 
 Verified environment: Windows workstation, Python 3.14 local build, native extension compiled in-place, benchmark matrix used during development before packaging cleanup.
 
@@ -87,7 +89,7 @@ python setup.py build_ext --inplace
 
 ### Python Wrapper
 
-The project is normally used through the wrapper, not by calling the C module directly.
+The project is normally used through the wrapper, not by calling the C module directly. The supported public API consists of exactly two models: `LQFT` and `MutableLQFT`.
 
 ```python
 from lqft_engine import LQFT
@@ -102,6 +104,35 @@ present = lqft.contains("beta")
 metrics = lqft.get_stats()
 print(result, present, metrics["physical_nodes"])
 ```
+
+### Mutable Frontend
+
+If the priority is to get much closer to Python dict on hot mutable workloads, use the mutable frontend and freeze into the native engine only when you need the structural LQFT form.
+
+```python
+from lqft_engine import MutableLQFT
+
+mutable = MutableLQFT()
+mutable.insert("alpha", "value-a")
+mutable.insert("beta", "value-b")
+
+print(mutable.search("alpha"))
+print(mutable.contains("beta"))
+
+native_snapshot = mutable.freeze()
+print(native_snapshot.search("alpha"))
+```
+
+When the native mutable hash-table methods are available, `MutableLQFT` uses them automatically; otherwise it falls back to a Python dict frontend. This is the recommended path when you want dict-like mutation speed first and native LQFT structure second.
+
+## Public API
+
+The supported user-facing models in `lqft_engine` are:
+
+- `LQFT`: persistent native trie-backed engine
+- `MutableLQFT`: mutable frontend optimized for active write and mixed workloads
+
+Other implementation details in the repository are internal and should not be relied on as public imports.
 
 ## License
 MIT License - Parjad Minooei (2026).

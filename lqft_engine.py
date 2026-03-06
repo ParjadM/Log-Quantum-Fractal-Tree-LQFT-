@@ -22,6 +22,13 @@ except ImportError as exc:
         "'python setup.py build_ext --inplace'."
     ) from exc
 
+
+def _new_native_lqft(migration_threshold=50000):
+    return LQFT(migration_threshold=migration_threshold)
+
+
+__all__ = ["LQFT", "MutableLQFT"]
+
 class LQFT:
     _instance_lock = threading.Lock()
     _live_instances = 0
@@ -72,7 +79,7 @@ class LQFT:
         self._pending_keys = []
         self._pending_value = None
         self._pending_values = []
-        self._pending_batch_size = 2048
+        self._pending_batch_size = 8192
         self._use_prehash_fastpath = False
         self._reads_sealed = False
         with LQFT._instance_lock:
@@ -310,24 +317,26 @@ class LQFT:
     def search(self, key):
         if self._pending_keys:
             self._flush_pending_inserts()
-        if type(key) is not str:
-            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if self._use_prehash_fastpath:
+            if type(key) is not str:
+                raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
             h = self._get_64bit_hash(key)
             return lqft_c_engine.search(h)
         if self._native_search_key is not None:
             return self._native_search_key(key)
+        if type(key) is not str:
+            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         h = self._get_64bit_hash(key)
         return lqft_c_engine.search(h)
 
     def remove(self, key):
         if self._pending_keys:
             self._flush_pending_inserts()
-        if type(key) is not str:
-            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if self._reads_sealed:
             self.unseal_reads()
         if self._use_prehash_fastpath:
+            if type(key) is not str:
+                raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
             h = self._get_64bit_hash(key)
             if hasattr(lqft_c_engine, 'delete'):
                 lqft_c_engine.delete(h)
@@ -335,6 +344,8 @@ class LQFT:
         if self._native_delete_key is not None:
             self._native_delete_key(key)
             return
+        if type(key) is not str:
+            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         h = self._get_64bit_hash(key)
         if hasattr(lqft_c_engine, 'delete'):
             lqft_c_engine.delete(h)
@@ -345,18 +356,18 @@ class LQFT:
     def contains(self, key):
         if self._pending_keys:
             self._flush_pending_inserts()
-        if type(key) is not str:
-            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if self._use_prehash_fastpath:
+            if type(key) is not str:
+                raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
             h = self._get_64bit_hash(key)
             return lqft_c_engine.contains(h)
         if self._native_contains_key is not None:
             return self._native_contains_key(key)
+        if type(key) is not str:
+            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         return self.search(key) is not None
 
     def bulk_insert(self, keys, value):
-        if type(value) is not str:
-            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
         if self._reads_sealed:
             self.unseal_reads()
         if self._pending_keys:
@@ -364,6 +375,8 @@ class LQFT:
         if self._native_bulk_insert_keys is not None:
             self._native_bulk_insert_keys(keys, value)
             return
+        if type(value) is not str:
+            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
         for key in keys:
             self.insert(key, value)
 
@@ -379,10 +392,6 @@ class LQFT:
         return count
 
     def bulk_insert_range(self, prefix, start, count, value):
-        if type(prefix) is not str:
-            raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
-        if type(value) is not str:
-            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
         if self._reads_sealed:
             self.unseal_reads()
         if self._pending_keys:
@@ -390,6 +399,10 @@ class LQFT:
         if self._native_bulk_insert_range is not None:
             self._native_bulk_insert_range(prefix, int(start), int(count), value)
             return
+        if type(prefix) is not str:
+            raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
+        if type(value) is not str:
+            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
         end = int(start) + int(count)
         for i in range(int(start), end):
             self.insert(f"{prefix}{i}", value)
@@ -397,10 +410,10 @@ class LQFT:
     def bulk_contains_range_count(self, prefix, start, count):
         if self._pending_keys:
             self._flush_pending_inserts()
-        if type(prefix) is not str:
-            raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
         if self._native_bulk_contains_range_count is not None:
             return int(self._native_bulk_contains_range_count(prefix, int(start), int(count)))
+        if type(prefix) is not str:
+            raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
         hit = 0
         end = int(start) + int(count)
         for i in range(int(start), end):
@@ -443,5 +456,453 @@ class LQFT:
             "auto_purge_enabled": self.auto_purge_enabled,
         }
 
-# Retain AdaptiveLQFT alias to support legacy benchmark scripts gracefully
-AdaptiveLQFT = LQFT
+class _FallbackMutableLQFT:
+    __slots__ = (
+        "is_native",
+        "auto_purge_enabled",
+        "max_memory_mb",
+        "total_ops",
+        "migration_threshold",
+        "_native_frontend",
+        "_native_insert_kv",
+        "_native_search_key",
+        "_native_delete_key",
+        "_native_contains_key",
+        "_native_clear",
+        "_native_len",
+        "_native_metrics",
+        "_native_export_items",
+        "_data",
+    )
+
+    def __init__(self, migration_threshold=50000):
+        self._native_frontend = False
+        self._native_insert_kv = None
+        self._native_search_key = None
+        self._native_delete_key = None
+        self._native_contains_key = None
+        self._native_clear = None
+        self._native_len = None
+        self._native_metrics = None
+        self._native_export_items = None
+        self.is_native = False
+        self.auto_purge_enabled = False
+        self.max_memory_mb = 1000.0
+        self.total_ops = 0
+        self.migration_threshold = migration_threshold
+        self._data = {}
+
+    def _validate_type(self, key, value=None):
+        if type(key) is not str:
+            raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
+        if value is not None and type(value) is not str:
+            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+
+    def set_prehash_fastpath(self, enabled: bool):
+        return None
+
+    def seal_reads(self):
+        return None
+
+    def unseal_reads(self):
+        return None
+
+    def set_auto_purge_threshold(self, threshold: float):
+        threshold = float(threshold)
+        if threshold <= 0:
+            raise ValueError("Auto-purge threshold must be > 0 MB.")
+        self.max_memory_mb = threshold
+        self.auto_purge_enabled = True
+
+    def disable_auto_purge(self):
+        self.auto_purge_enabled = False
+
+    def set_write_batch_size(self, batch_size: int):
+        batch_size = int(batch_size)
+        if batch_size <= 0:
+            raise ValueError("Write batch size must be > 0.")
+
+    def purge(self):
+        self.clear()
+
+    def clear(self):
+        self._data.clear()
+
+    def insert(self, key, value):
+        self._validate_type(key, value)
+        self._data[key] = value
+
+    def search(self, key):
+        self._validate_type(key)
+        return self._data.get(key)
+
+    def remove(self, key):
+        self._validate_type(key)
+        self._data.pop(key, None)
+
+    def delete(self, key):
+        self.remove(key)
+
+    def contains(self, key):
+        self._validate_type(key)
+        return key in self._data
+
+    def bulk_insert(self, keys, value):
+        if type(value) is not str:
+            raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+        for key in keys:
+            self.insert(key, value)
+
+    def bulk_contains_count(self, keys):
+        hit = 0
+        for key in keys:
+            if self.contains(key):
+                hit += 1
+        return hit
+
+    def bulk_insert_range(self, prefix, start, count, value):
+        self._validate_type(prefix, value)
+        end = int(start) + int(count)
+        for i in range(int(start), end):
+            self.insert(f"{prefix}{i}", value)
+
+    def bulk_contains_range_count(self, prefix, start, count):
+        self._validate_type(prefix)
+        hit = 0
+        end = int(start) + int(count)
+        for i in range(int(start), end):
+            if f"{prefix}{i}" in self._data:
+                hit += 1
+        return hit
+
+    def freeze(self, target=None):
+        target = target or _new_native_lqft(self.migration_threshold)
+        keys = list(self._data.keys())
+        values = [self._data[key] for key in keys]
+        if keys:
+            bulk_insert_pairs = getattr(target, "_native_bulk_insert_key_values", None)
+            native_insert = getattr(target, "_native_insert_kv", None)
+            if bulk_insert_pairs is not None:
+                bulk_insert_pairs(keys, values)
+            elif native_insert is not None:
+                for key, value in zip(keys, values):
+                    native_insert(key, value)
+            else:
+                for key, value in zip(keys, values):
+                    target.insert(key, value)
+        return target
+
+    def get_stats(self):
+        return {
+            "logical_inserts": len(self._data),
+            "physical_nodes": len(self._data),
+            "frontend": "python-dict",
+        }
+
+    def status(self):
+        return {
+            "mode": "Mutable Python dict frontend",
+            "items": len(self._data),
+            "threshold": f"{self.max_memory_mb} MB Circuit Breaker",
+            "auto_purge_enabled": self.auto_purge_enabled,
+        }
+
+    def __len__(self):
+        return len(self._data)
+
+    def __setitem__(self, key, value):
+        self.insert(key, value)
+
+    def __getitem__(self, key):
+        result = self.search(key)
+        if result is None:
+            raise KeyError(key)
+        return result
+
+    def __delitem__(self, key):
+        if not self.contains(key):
+            raise KeyError(key)
+        self.delete(key)
+
+
+if hasattr(lqft_c_engine, "NativeMutableLQFT"):
+    class _NativeMutableLQFT(lqft_c_engine.NativeMutableLQFT):
+        __slots__ = (
+            "is_native",
+            "auto_purge_enabled",
+            "max_memory_mb",
+            "total_ops",
+            "migration_threshold",
+        )
+
+        def __init__(self, migration_threshold=50000):
+            super().__init__()
+            self.is_native = True
+            self.auto_purge_enabled = False
+            self.max_memory_mb = 1000.0
+            self.total_ops = 0
+            self.migration_threshold = migration_threshold
+
+        def set_prehash_fastpath(self, enabled: bool):
+            return None
+
+        def seal_reads(self):
+            return None
+
+        def unseal_reads(self):
+            return None
+
+        def set_auto_purge_threshold(self, threshold: float):
+            threshold = float(threshold)
+            if threshold <= 0:
+                raise ValueError("Auto-purge threshold must be > 0 MB.")
+            self.max_memory_mb = threshold
+            self.auto_purge_enabled = True
+
+        def disable_auto_purge(self):
+            self.auto_purge_enabled = False
+
+        def set_write_batch_size(self, batch_size: int):
+            batch_size = int(batch_size)
+            if batch_size <= 0:
+                raise ValueError("Write batch size must be > 0.")
+
+        def purge(self):
+            self.clear()
+
+        def bulk_insert(self, keys, value):
+            for key in keys:
+                self.insert(key, value)
+
+        def bulk_contains_count(self, keys):
+            hit = 0
+            for key in keys:
+                if self.contains(key):
+                    hit += 1
+            return hit
+
+        def bulk_insert_range(self, prefix, start, count, value):
+            end = int(start) + int(count)
+            for i in range(int(start), end):
+                self.insert(f"{prefix}{i}", value)
+
+        def bulk_contains_range_count(self, prefix, start, count):
+            hit = 0
+            end = int(start) + int(count)
+            for i in range(int(start), end):
+                if self.contains(f"{prefix}{i}"):
+                    hit += 1
+            return hit
+
+        def freeze(self, target=None):
+            target = target or _new_native_lqft(self.migration_threshold)
+            keys, values = self.export_items()
+            if keys:
+                bulk_insert_pairs = getattr(target, "_native_bulk_insert_key_values", None)
+                native_insert = getattr(target, "_native_insert_kv", None)
+                if bulk_insert_pairs is not None:
+                    bulk_insert_pairs(keys, values)
+                elif native_insert is not None:
+                    for key, value in zip(keys, values):
+                        native_insert(key, value)
+                else:
+                    for key, value in zip(keys, values):
+                        target.insert(key, value)
+            return target
+
+        def get_stats(self):
+            return self.get_metrics()
+
+        def status(self):
+            return {
+                "mode": "Mutable native C hash table",
+                "items": len(self),
+                "threshold": f"{self.max_memory_mb} MB Circuit Breaker",
+                "auto_purge_enabled": self.auto_purge_enabled,
+            }
+
+        def __setitem__(self, key, value):
+            self.insert(key, value)
+
+        def __getitem__(self, key):
+            result = self.search(key)
+            if result is None:
+                raise KeyError(key)
+            return result
+
+        def __delitem__(self, key):
+            if not self.contains(key):
+                raise KeyError(key)
+            self.delete(key)
+else:
+    class _NativeMutableLQFT:
+        __slots__ = (
+            "is_native",
+            "auto_purge_enabled",
+            "max_memory_mb",
+            "total_ops",
+            "migration_threshold",
+            "_native_state",
+            "_native_insert_kv",
+            "_native_search_key",
+            "_native_delete_key",
+            "_native_contains_key",
+            "_native_clear",
+            "_native_len",
+            "_native_metrics",
+            "_native_export_items",
+        )
+
+        def __init__(self, migration_threshold=50000):
+            self.is_native = True
+            self.auto_purge_enabled = False
+            self.max_memory_mb = 1000.0
+            self.total_ops = 0
+            self.migration_threshold = migration_threshold
+            self._native_state = lqft_c_engine.mutable_new()
+            self._native_insert_kv = lqft_c_engine.mutable_insert_key_value
+            self._native_search_key = lqft_c_engine.mutable_search_key
+            self._native_delete_key = lqft_c_engine.mutable_delete_key
+            self._native_contains_key = lqft_c_engine.mutable_contains_key
+            self._native_clear = lqft_c_engine.mutable_clear
+            self._native_len = lqft_c_engine.mutable_len
+            self._native_metrics = lqft_c_engine.mutable_get_metrics
+            self._native_export_items = lqft_c_engine.mutable_export_items
+
+        def _validate_type(self, key, value=None):
+            if type(key) is not str:
+                raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
+            if value is not None and type(value) is not str:
+                raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+
+        def set_prehash_fastpath(self, enabled: bool):
+            return None
+
+        def seal_reads(self):
+            return None
+
+        def unseal_reads(self):
+            return None
+
+        def set_auto_purge_threshold(self, threshold: float):
+            threshold = float(threshold)
+            if threshold <= 0:
+                raise ValueError("Auto-purge threshold must be > 0 MB.")
+            self.max_memory_mb = threshold
+            self.auto_purge_enabled = True
+
+        def disable_auto_purge(self):
+            self.auto_purge_enabled = False
+
+        def set_write_batch_size(self, batch_size: int):
+            batch_size = int(batch_size)
+            if batch_size <= 0:
+                raise ValueError("Write batch size must be > 0.")
+
+        def purge(self):
+            self.clear()
+
+        def clear(self):
+            self._native_clear(self._native_state)
+
+        def insert(self, key, value):
+            self._native_insert_kv(self._native_state, key, value)
+
+        def search(self, key):
+            return self._native_search_key(self._native_state, key)
+
+        def remove(self, key):
+            self._native_delete_key(self._native_state, key)
+
+        def delete(self, key):
+            self.remove(key)
+
+        def contains(self, key):
+            return bool(self._native_contains_key(self._native_state, key))
+
+        def bulk_insert(self, keys, value):
+            for key in keys:
+                self.insert(key, value)
+
+        def bulk_contains_count(self, keys):
+            hit = 0
+            for key in keys:
+                if self.contains(key):
+                    hit += 1
+            return hit
+
+        def bulk_insert_range(self, prefix, start, count, value):
+            end = int(start) + int(count)
+            for i in range(int(start), end):
+                self.insert(f"{prefix}{i}", value)
+
+        def bulk_contains_range_count(self, prefix, start, count):
+            hit = 0
+            end = int(start) + int(count)
+            for i in range(int(start), end):
+                if self.contains(f"{prefix}{i}"):
+                    hit += 1
+            return hit
+
+        def freeze(self, target=None):
+            target = target or _new_native_lqft(self.migration_threshold)
+            keys, values = self._native_export_items(self._native_state)
+            if keys:
+                bulk_insert_pairs = getattr(target, "_native_bulk_insert_key_values", None)
+                native_insert = getattr(target, "_native_insert_kv", None)
+                if bulk_insert_pairs is not None:
+                    bulk_insert_pairs(keys, values)
+                elif native_insert is not None:
+                    for key, value in zip(keys, values):
+                        native_insert(key, value)
+                else:
+                    for key, value in zip(keys, values):
+                        target.insert(key, value)
+            return target
+
+        def get_stats(self):
+            return self._native_metrics(self._native_state)
+
+        def get_metrics(self):
+            return self.get_stats()
+
+        def status(self):
+            return {
+                "mode": "Mutable native C hash table",
+                "items": len(self),
+                "threshold": f"{self.max_memory_mb} MB Circuit Breaker",
+                "auto_purge_enabled": self.auto_purge_enabled,
+            }
+
+        def __len__(self):
+            return int(self._native_len(self._native_state))
+
+        def __setitem__(self, key, value):
+            self.insert(key, value)
+
+        def __getitem__(self, key):
+            result = self.search(key)
+            if result is None:
+                raise KeyError(key)
+            return result
+
+        def __delitem__(self, key):
+            if not self.contains(key):
+                raise KeyError(key)
+            self.delete(key)
+
+
+MutableLQFT = _NativeMutableLQFT if all(
+    hasattr(lqft_c_engine, name)
+    for name in (
+        "mutable_new",
+        "mutable_insert_key_value",
+        "mutable_search_key",
+        "mutable_delete_key",
+        "mutable_contains_key",
+        "mutable_clear",
+        "mutable_len",
+        "mutable_get_metrics",
+        "mutable_export_items",
+    )
+) else _FallbackMutableLQFT

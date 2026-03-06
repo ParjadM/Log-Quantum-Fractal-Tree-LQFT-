@@ -1,8 +1,8 @@
-# LQFT Production Release (v1.1.5)
+# LQFT Production Release (v1.1.6)
 # Architect: Parjad Minooei
 # Target: McMaster B.Tech Portfolio
 
-$Version = "v1.1.5"
+$Version = "v1.1.6"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
@@ -22,15 +22,15 @@ $Version | Out-File -FilePath "version.txt" -Encoding utf8
 
 # 3. RELEASE NOTE SUMMARY
 Write-Host "[*] Release note summary:" -ForegroundColor Cyan
-Write-Host "    - Keep native paired key/value batching for unique-value writes." -ForegroundColor Gray
-Write-Host "    - Pure write throughput improved materially in local benchmarking." -ForegroundColor Gray
-Write-Host "    - Read-heavy and mixed workloads remain benchmark-dependent." -ForegroundColor Gray
+Write-Host "    - Keep the public API focused on LQFT and MutableLQFT." -ForegroundColor Gray
+Write-Host "    - MutableLQFT improved materially in write-heavy, mixed, and churn-heavy local benchmarking." -ForegroundColor Gray
+Write-Host "    - Persistent LQFT improved in native-backed reads and writes, but some results remain benchmark-dependent." -ForegroundColor Gray
 Write-Host "    - This release should not claim broad superiority over dict/hash tables." -ForegroundColor Gray
 
 # 4. GITHUB SYNC
 Write-Host "[*] Staging $Version release source..." -ForegroundColor Cyan
 git add .
-git commit -m "release: $Version - write batching uplift with blunt benchmark notes"
+git commit -m "release: $Version - public API cleanup and native mutable uplift"
 git push origin main
 
 # 5. TAG RELEASE
