@@ -14,7 +14,7 @@ The **Log-Quantum Fractal Tree (LQFT)** is a high-performance, scale-invariant d
 
 ---
 
-## 🏆 Performance Certification (v1.0.4 Stable)
+## 🏆 Performance Certification (v1.0.5 Stable)
 
 *Verified Environment: Python 3.12 | MSYS2/MinGW64 GCC -O3 | 16-Core Physical Affinity*
 

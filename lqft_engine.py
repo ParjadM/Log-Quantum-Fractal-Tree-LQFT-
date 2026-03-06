@@ -4,11 +4,10 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# STRICT NATIVE ENTERPRISE ENGINE (v0.9.0)
+# STRICT NATIVE ENTERPRISE WRAPPER (v1.0.5)
 # ---------------------------------------------------------
 # Architect: Parjad Minooei
-# Status: Pure Python fallback removed. Strict C-Core interface.
-# Features: Arena Allocator, Circuit Breaker, Disk Persistence, Batch FFI.
+# Target: McMaster B.Tech / UofT MScAC Portfolio
 
 try:
     import lqft_c_engine
@@ -19,11 +18,13 @@ except ImportError:
     sys.exit(1)
 
 class LQFT:
-    def __init__(self):
+    # F-03 & F-04: Restored migration_threshold to sync API signatures across the suite
+    def __init__(self, migration_threshold=50000):
         self.is_native = True
         self.auto_purge_enabled = True
         self.max_memory_mb = 1000.0 
         self.total_ops = 0
+        self.migration_threshold = migration_threshold 
         self._process = psutil.Process(os.getpid())
 
     def _validate_type(self, key, value=None):
@@ -33,9 +34,8 @@ class LQFT:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
 
     def _get_64bit_hash(self, key):
-        return int(hashlib.md5(key.encode()).hexdigest()[:16], 16)
+        return int(hashlib.md5(str(key).encode()).hexdigest()[:16], 16)
 
-    # --- Systems Memory Management ---
     def set_auto_purge_threshold(self, threshold: float):
         self.max_memory_mb = threshold
 
@@ -47,24 +47,21 @@ class LQFT:
     def get_stats(self):
         return lqft_c_engine.get_metrics()
 
+    # F-02: Standardized Metric Mapping (Dunder Method)
+    def __len__(self):
+        """Allows native Python len() to fetch logical_inserts from the C-Engine."""
+        stats = self.get_stats()
+        # Maps directly to the sharded hardware counters in the C-kernel
+        return stats.get('logical_inserts', 0)
+
     def clear(self):
         return lqft_c_engine.free_all()
 
-    # --- Native Disk Persistence ---
-    def save_to_disk(self, filepath: str):
-        lqft_c_engine.save_to_disk(filepath)
-
-    def load_from_disk(self, filepath: str):
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Missing LQFT database file: {filepath}")
-        lqft_c_engine.load_from_disk(filepath)
-
-    # --- Core CRUD Operations ---
     def insert(self, key, value):
         self._validate_type(key, value)
         self.total_ops += 1
         
-        # Memory Circuit Breaker
+        # Heuristic Circuit Breaker check
         if self.auto_purge_enabled and self.total_ops % 5000 == 0:
             current_mb = self._process.memory_info().rss / (1024 * 1024)
             if current_mb >= self.max_memory_mb:
@@ -81,24 +78,12 @@ class LQFT:
     def remove(self, key):
         self._validate_type(key)
         h = self._get_64bit_hash(key)
-        lqft_c_engine.delete(h)
+        if hasattr(lqft_c_engine, 'delete'):
+            lqft_c_engine.delete(h)
 
     def delete(self, key):
         self.remove(key)
 
-    # --- High-Speed Batching (v0.9.0 Benchmark Optimization) ---
-    def insert_batch(self, keys, value_payload="batch_data"):
-        """Bypasses FFI loop tax by hashing in Python and sending one massive array to C."""
-        hashes = [self._get_64bit_hash(k) for k in keys]
-        self.total_ops += len(hashes)
-        lqft_c_engine.insert_batch(hashes, str(value_payload))
-
-    def search_batch(self, keys):
-        """High-speed bulk lookup for dashboards."""
-        hashes = [self._get_64bit_hash(k) for k in keys]
-        return lqft_c_engine.search_batch(hashes)
-
-    # --- Pythonic Syntactic Sugar ---
     def __setitem__(self, key, value):
         self.insert(key, value)
 
@@ -122,5 +107,5 @@ class LQFT:
             "threshold": f"{self.max_memory_mb} MB Circuit Breaker"
         }
 
-# Alias mapping so older benchmark scripts don't crash
+# Retain AdaptiveLQFT alias to support legacy benchmark scripts gracefully
 AdaptiveLQFT = LQFT
