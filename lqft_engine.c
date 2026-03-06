@@ -134,7 +134,7 @@ static inline void fast_unlock(volatile long* lk) {
 // GLOBAL METRIC SHARDING (F-02)
 // ===================================================================
 
-#define MAX_TRACKED_THREADS 256
+#define MAX_TRACKED_THREADS 4096
 
 typedef struct {
     int64_t phys_added;
@@ -146,6 +146,8 @@ typedef struct {
 static ALIGN_64 ThreadMetrics global_metrics_array[MAX_TRACKED_THREADS];
 static volatile long registered_threads_count = 0;
 static THREAD_LOCAL ThreadMetrics* my_metrics = NULL;
+static volatile long global_arena_epoch = 1;
+static THREAD_LOCAL long local_arena_epoch = 0;
 
 static inline ThreadMetrics* get_my_metrics() {
     if (my_metrics == NULL) {
@@ -157,7 +159,8 @@ static inline ThreadMetrics* get_my_metrics() {
         if (idx < MAX_TRACKED_THREADS) {
             my_metrics = &global_metrics_array[idx];
         } else {
-            my_metrics = &global_metrics_array[0]; 
+            // Overflow bucket to avoid distorting thread-0 metrics.
+            my_metrics = &global_metrics_array[MAX_TRACKED_THREADS - 1];
         }
     }
     return my_metrics;
@@ -278,6 +281,66 @@ static THREAD_LOCAL LQFTNode*** local_ret_arr_head = NULL;
 static THREAD_LOCAL LQFTNode*** local_ret_arr_tail = NULL;
 static THREAD_LOCAL int local_ret_arr_count = 0;
 
+static inline void reset_tls_state_if_needed(void) {
+    long ge = global_arena_epoch;
+    if (local_arena_epoch == ge) return;
+
+    // A global purge/free_all occurred. Drop stale per-thread pointers.
+    local_arena.current_node_chunk = NULL;
+    local_arena.node_chunk_idx = ARENA_CHUNK_SIZE;
+    local_arena.node_free_list = NULL;
+    local_arena.current_child_chunk = NULL;
+    local_arena.child_chunk_idx = ARENA_CHUNK_SIZE;
+    local_arena.array_free_list = NULL;
+
+    local_ret_node_head = NULL;
+    local_ret_node_tail = NULL;
+    local_ret_node_count = 0;
+    local_ret_arr_head = NULL;
+    local_ret_arr_tail = NULL;
+    local_ret_arr_count = 0;
+
+    local_arena_epoch = ge;
+}
+
+static inline NodeChunk* pop_pre_zeroed_node_chunk(void) {
+    NodeChunk* head;
+    for (;;) {
+        head = pre_zeroed_node_chunks;
+        if (!head) return NULL;
+#ifdef _MSC_VER
+        if (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_node_chunks, (void*)head->next_global, (void*)head) == (void*)head) {
+            _InterlockedDecrement(&pre_node_count);
+            return head;
+        }
+#else
+        if (__sync_bool_compare_and_swap(&pre_zeroed_node_chunks, head, head->next_global)) {
+            __sync_fetch_and_sub(&pre_node_count, 1);
+            return head;
+        }
+#endif
+    }
+}
+
+static inline ChildChunk* pop_pre_zeroed_child_chunk(void) {
+    ChildChunk* head;
+    for (;;) {
+        head = pre_zeroed_child_chunks;
+        if (!head) return NULL;
+#ifdef _MSC_VER
+        if (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_child_chunks, (void*)head->next_global, (void*)head) == (void*)head) {
+            _InterlockedDecrement(&pre_child_count);
+            return head;
+        }
+#else
+        if (__sync_bool_compare_and_swap(&pre_zeroed_child_chunks, head, head->next_global)) {
+            __sync_fetch_and_sub(&pre_child_count, 1);
+            return head;
+        }
+#endif
+    }
+}
+
 static LQFTNode** registry = NULL;
 
 typedef struct {
@@ -382,6 +445,8 @@ void* background_alloc_thread(void* arg) {
 }
 
 LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, uint64_t full_hash) {
+    reset_tls_state_if_needed();
+
     LQFTNode* node = NULL;
     if (!local_arena.node_free_list) {
 #ifdef _MSC_VER
@@ -405,20 +470,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
         local_arena.node_free_list = (LQFTNode*)node->children;
     } else {
         if (local_arena.node_chunk_idx >= ARENA_CHUNK_SIZE) {
-            NodeChunk* new_chunk = NULL;
-#ifdef _MSC_VER
-            do {
-                new_chunk = pre_zeroed_node_chunks;
-                if (!new_chunk) break;
-            } while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_node_chunks, (void*)new_chunk->next_global, (void*)new_chunk) != (void*)new_chunk);
-            if (new_chunk) _InterlockedDecrement(&pre_node_count);
-#else
-            do {
-                new_chunk = pre_zeroed_node_chunks;
-                if (!new_chunk) break;
-            } while (!__sync_bool_compare_and_swap(&pre_zeroed_node_chunks, new_chunk, new_chunk->next_global));
-            if (new_chunk) __sync_fetch_and_sub(&pre_node_count, 1);
-#endif
+            NodeChunk* new_chunk = pop_pre_zeroed_node_chunk();
             if (!new_chunk) {
                 new_chunk = alloc_node_chunk();
             }
@@ -461,20 +513,7 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
             local_arena.array_free_list = (LQFTNode***)arr[0];
         } else {
             if (local_arena.child_chunk_idx >= ARENA_CHUNK_SIZE) {
-                ChildChunk* new_chunk = NULL;
-#ifdef _MSC_VER
-                do {
-                    new_chunk = pre_zeroed_child_chunks;
-                    if (!new_chunk) break;
-                } while (_InterlockedCompareExchangePointer((void* volatile*)&pre_zeroed_child_chunks, (void*)new_chunk->next_global, (void*)new_chunk) != (void*)new_chunk);
-                if (new_chunk) _InterlockedDecrement(&pre_child_count);
-#else
-                do {
-                    new_chunk = pre_zeroed_child_chunks;
-                    if (!new_chunk) break;
-                } while (!__sync_bool_compare_and_swap(&pre_zeroed_child_chunks, new_chunk, new_chunk->next_global));
-                if (new_chunk) __sync_fetch_and_sub(&pre_child_count, 1);
-#endif
+                ChildChunk* new_chunk = pop_pre_zeroed_child_chunk();
                 if (!new_chunk) {
                     new_chunk = alloc_child_chunk();
                 }
@@ -498,8 +537,10 @@ LQFTNode* create_node(void* value, uint64_t key_hash, LQFTNode** children_src, u
 
 void decref(LQFTNode* start_node) {
     if (!start_node || start_node == TOMBSTONE) return;
-    LQFTNode* cleanup_stack[512]; 
+    int cap = 1024;
     int top = 0;
+    LQFTNode** cleanup_stack = (LQFTNode**)malloc((size_t)cap * sizeof(LQFTNode*));
+    if (!cleanup_stack) return;
     cleanup_stack[top++] = start_node;
     while (top > 0) {
         LQFTNode* node = cleanup_stack[--top];
@@ -512,7 +553,19 @@ void decref(LQFTNode* start_node) {
             fast_unlock(&stripe_locks[stripe].flag);
             if (node->children) {
                 for (int i = 0; i < 32; i++) {
-                    if (node->children[i]) cleanup_stack[top++] = node->children[i];
+                    if (node->children[i]) {
+                        if (top >= cap) {
+                            int next_cap = cap * 2;
+                            LQFTNode** grown = (LQFTNode**)realloc(cleanup_stack, (size_t)next_cap * sizeof(LQFTNode*));
+                            if (!grown) {
+                                free(cleanup_stack);
+                                return;
+                            }
+                            cleanup_stack = grown;
+                            cap = next_cap;
+                        }
+                        cleanup_stack[top++] = node->children[i];
+                    }
                 }
                 LQFTNode*** arr = (LQFTNode***)node->children;
                 arr[0] = (LQFTNode**)local_ret_arr_head;
@@ -564,6 +617,23 @@ void decref(LQFTNode* start_node) {
             get_my_metrics()->phys_freed++;
         }
     }
+    free(cleanup_stack);
+}
+
+static inline int node_matches_signature(const LQFTNode* node, const char* value_ptr, uint64_t key_hash, LQFTNode** children) {
+    if (!node) return 0;
+    if (node->key_hash != key_hash) return 0;
+
+    if ((node->value == NULL) != (value_ptr == NULL)) return 0;
+    if (node->value && value_ptr && strcmp((const char*)node->value, value_ptr) != 0) return 0;
+
+    if ((node->children == NULL) != (children == NULL)) return 0;
+    if (node->children && children) {
+        for (int i = 0; i < 32; i++) {
+            if (node->children[i] != children[i]) return 0;
+        }
+    }
+    return 1;
 }
 
 LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** children, uint64_t full_hash) {
@@ -571,20 +641,28 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     uint32_t local_idx = (uint32_t)((full_hash ^ (full_hash >> 32)) & STRIPE_MASK);
     uint32_t global_idx = (stripe * STRIPE_SIZE) + local_idx;
     uint32_t start_idx = local_idx;
+
+    // Minimal stability hardening: protect canonical-registry probing with stripe lock
+    // to avoid racing against concurrent tombstoning/reclamation.
+    fast_lock_backoff(&stripe_locks[stripe].flag);
     for (;;) {
         LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
-        if (slot != TOMBSTONE && slot->full_hash_val == full_hash) {
-            ATOMIC_INC(&slot->ref_count); 
+        if (slot != TOMBSTONE && slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, key_hash, children)) {
+            ATOMIC_INC(&slot->ref_count);
+            fast_unlock(&stripe_locks[stripe].flag);
             return slot;
         }
         local_idx = (local_idx + 1) & STRIPE_MASK;
         global_idx = (stripe * STRIPE_SIZE) + local_idx;
-        if (local_idx == start_idx) break; 
+        if (local_idx == start_idx) break;
     }
+    fast_unlock(&stripe_locks[stripe].flag);
+
     LQFTNode* new_node = create_node(value_ptr ? (void*)portable_strdup(value_ptr) : NULL, key_hash, children, full_hash);
     if (!new_node) return NULL;
-    new_node->ref_count = 1; 
+    new_node->ref_count = 1;
+
     fast_lock_backoff(&stripe_locks[stripe].flag);
     local_idx = (uint32_t)((full_hash ^ (full_hash >> 32)) & STRIPE_MASK);
     global_idx = (stripe * STRIPE_SIZE) + local_idx;
@@ -594,7 +672,7 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
         LQFTNode* slot = registry[global_idx];
         if (slot == NULL) break;
         if (slot == TOMBSTONE) { if (first_tombstone == -1) first_tombstone = (int)local_idx; }
-        else if (slot->full_hash_val == full_hash) {
+        else if (slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, key_hash, children)) {
             ATOMIC_INC(&slot->ref_count);
             fast_unlock(&stripe_locks[stripe].flag);
             if (new_node->value) free(new_node->value);
@@ -745,8 +823,18 @@ char* core_search(uint64_t h, LQFTNode* root) {
 }
 
 static void c_internal_insert_rw(uint64_t h, const char* val_str) {
-    uint64_t pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
-    pre = fnv1a_update(pre, val_str, strlen(val_str));
+    // Small TLS cache avoids repeated value hashing for hot constants (e.g. "x", "active").
+    static THREAD_LOCAL const char* last_val_ptr = NULL;
+    static THREAD_LOCAL uint64_t last_pre = 0;
+    uint64_t pre;
+    if (val_str == last_val_ptr) {
+        pre = last_pre;
+    } else {
+        pre = fnv1a_update(FNV_OFFSET_BASIS, "leaf:", 5);
+        pre = fnv1a_update(pre, val_str, strlen(val_str));
+        last_val_ptr = val_str;
+        last_pre = pre;
+    }
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     get_my_metrics()->logical_inserts++;
     int spin = 0;
@@ -976,6 +1064,13 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
     for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
         global_metrics_array[i].phys_added = 0; global_metrics_array[i].phys_freed = 0; global_metrics_array[i].logical_inserts = 0;
     }
+#ifdef _MSC_VER
+    _InterlockedExchange(&registered_threads_count, 0);
+    _InterlockedIncrement(&global_arena_epoch);
+#else
+    __sync_lock_test_and_set(&registered_threads_count, 0);
+    __sync_add_and_fetch(&global_arena_epoch, 1);
+#endif
     for(int i = NUM_STRIPES - 1; i >= 0; i--) fast_unlock(&stripe_locks[i].flag);
     for(int i = NUM_ROOTS - 1; i >= 0; i--) { 
         global_roots[i].root = NULL; 
