@@ -22,14 +22,32 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install setuptools wheel pytest psutil
+        pip install setuptools wheel psutil
 
     - name: Compile C-Engine
       run: |
         python setup.py build_ext --inplace
 
-    - name: Run Pytest Suite (Logical Verification Only)
+    - name: Run Logical Smoke Test
       run: |
-        # We only run the logical proofs here. 
-        # Hardware saturation benchmarks should remain strictly local.
-        pytest test_pure_python_ds.py -v
+        # Keep CI focused on package correctness.
+        # Heavy benchmarks remain local-only and the old pytest file was removed during package cleanup.
+        python - <<'PY'
+        import lqft_engine
+
+        engine = lqft_engine.LQFT()
+        engine.insert("alpha", "value-a")
+        engine.insert("beta", "value-b")
+
+        assert engine.search("alpha") == "value-a"
+        assert engine.contains("beta") is True
+
+        engine.remove("alpha")
+        assert engine.search("alpha") is None
+
+        stats = engine.get_stats()
+        assert isinstance(stats, dict)
+        assert "physical_nodes" in stats
+
+        print("logical smoke test passed")
+        PY
