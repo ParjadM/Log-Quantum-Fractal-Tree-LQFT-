@@ -353,6 +353,24 @@ static ALIGN_64 PaddedRoot global_roots[NUM_ROOTS];
 static ALIGN_64 PaddedRWLock root_locks[NUM_ROOTS];
 static ALIGN_64 PaddedLock stripe_locks[NUM_STRIPES];
 
+#define VALUE_POOL_BUCKETS 4096
+
+typedef struct ValueEntry {
+    char* str;
+    uint64_t hash;
+    volatile long ref_count;
+    struct ValueEntry* next;
+} ValueEntry;
+
+static ValueEntry* value_pool[VALUE_POOL_BUCKETS] = {0};
+static ALIGN_64 PaddedLock value_pool_locks[VALUE_POOL_BUCKETS];
+static int64_t value_pool_entry_count = 0;
+static int64_t value_pool_total_bytes = 0;
+
+static const char* value_acquire(const char* value_ptr);
+static void value_release(const char* value_ptr);
+static void value_pool_clear_all(void);
+
 const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
 const uint64_t FNV_PRIME = 1099511628211ULL;
 
@@ -591,7 +609,7 @@ void decref(LQFTNode* start_node) {
                     local_ret_arr_count = 0;
                 }
             }
-            if (node->value) free(node->value);
+            if (node->value) value_release((const char*)node->value);
             node->children = (LQFTNode**)local_ret_node_head;
             local_ret_node_head = node;
             if (local_ret_node_count == 0) local_ret_node_tail = node;
@@ -659,7 +677,9 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
     }
     fast_unlock(&stripe_locks[stripe].flag);
 
-    LQFTNode* new_node = create_node(value_ptr ? (void*)portable_strdup(value_ptr) : NULL, key_hash, children, full_hash);
+    const char* canonical_value = value_ptr ? value_acquire(value_ptr) : NULL;
+    if (value_ptr && !canonical_value) return NULL;
+    LQFTNode* new_node = create_node((void*)canonical_value, key_hash, children, full_hash);
     if (!new_node) return NULL;
     new_node->ref_count = 1;
 
@@ -675,7 +695,7 @@ LQFTNode* get_canonical_v2(const char* value_ptr, uint64_t key_hash, LQFTNode** 
         else if (slot->full_hash_val == full_hash && node_matches_signature(slot, value_ptr, key_hash, children)) {
             ATOMIC_INC(&slot->ref_count);
             fast_unlock(&stripe_locks[stripe].flag);
-            if (new_node->value) free(new_node->value);
+            if (new_node->value) value_release((const char*)new_node->value);
             if (new_node->children) {
                 LQFTNode*** arr = (LQFTNode***)new_node->children;
                 arr[0] = (LQFTNode**)local_ret_arr_head;
@@ -822,6 +842,33 @@ char* core_search(uint64_t h, LQFTNode* root) {
     return NULL;
 }
 
+static inline uint64_t hash_key_string(const char* key_str) {
+    // One-pass FNV-1a for NUL-terminated UTF-8 keys (avoids strlen + second scan).
+    uint64_t h = FNV_OFFSET_BASIS;
+    const unsigned char* p = (const unsigned char*)key_str;
+    while (*p) {
+        h ^= (uint64_t)(*p++);
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+static inline uint64_t fnv1a_update_u64_decimal(uint64_t hash, uint64_t value) {
+    // Append unsigned integer digits directly to FNV stream without heap allocation.
+    char rev[20];
+    int len = 0;
+    do {
+        rev[len++] = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value != 0);
+
+    for (int i = len - 1; i >= 0; i--) {
+        hash ^= (uint64_t)(unsigned char)rev[i];
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
+
 static void c_internal_insert_rw(uint64_t h, const char* val_str) {
     // Small TLS cache avoids repeated value hashing for hot constants (e.g. "x", "active").
     static THREAD_LOCAL const char* last_val_ptr = NULL;
@@ -966,25 +1013,261 @@ static PyObject* method_insert(PyObject* self, PyObject* const* args, Py_ssize_t
     Py_RETURN_NONE;
 }
 
+static PyObject* method_insert_key_value(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    const char* val_str = PyUnicode_AsUTF8(args[1]);
+    if (!key_str || !val_str) return NULL;
+    uint64_t h = hash_key_string(key_str);
+    Py_BEGIN_ALLOW_THREADS
+    c_internal_insert_rw(h, val_str);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) return NULL;
+    PyObject* seq = PySequence_Fast(args[0], "bulk_insert_keys expects a sequence of string keys");
+    if (!seq) return NULL;
+
+    const char* val_str = PyUnicode_AsUTF8(args[1]);
+    if (!val_str) {
+        Py_DECREF(seq);
+        return NULL;
+    }
+
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    if (n <= 0) {
+        Py_DECREF(seq);
+        Py_RETURN_NONE;
+    }
+
+    uint64_t* hashes = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+    if (!hashes) {
+        Py_DECREF(seq);
+        return PyErr_NoMemory();
+    }
+
+    PyObject** items = PySequence_Fast_ITEMS(seq);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        const char* key_str = PyUnicode_AsUTF8(items[i]);
+        if (!key_str) {
+            free(hashes);
+            Py_DECREF(seq);
+            return NULL;
+        }
+        hashes[i] = hash_key_string(key_str);
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < n; i++) {
+        c_internal_insert_rw(hashes[i], val_str);
+    }
+    Py_END_ALLOW_THREADS
+
+    free(hashes);
+    Py_DECREF(seq);
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_bulk_insert_range(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 4) return NULL;
+    const char* prefix = PyUnicode_AsUTF8(args[0]);
+    if (!prefix) return NULL;
+    unsigned long long start = PyLong_AsUnsignedLongLong(args[1]);
+    if (PyErr_Occurred()) return NULL;
+    unsigned long long count = PyLong_AsUnsignedLongLong(args[2]);
+    if (PyErr_Occurred()) return NULL;
+    const char* val_str = PyUnicode_AsUTF8(args[3]);
+    if (!val_str) return NULL;
+
+    uint64_t prefix_hash = fnv1a_update(FNV_OFFSET_BASIS, prefix, strlen(prefix));
+
+    Py_BEGIN_ALLOW_THREADS
+    for (unsigned long long i = 0; i < count; i++) {
+        uint64_t h = fnv1a_update_u64_decimal(prefix_hash, (uint64_t)(start + i));
+        c_internal_insert_rw(h, val_str);
+    }
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
 static PyObject* method_search(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 1) return NULL;
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
     char* safe_copy = NULL; 
-    Py_BEGIN_ALLOW_THREADS 
+    Py_BEGIN_ALLOW_THREADS
+    LQFTNode* current_root = NULL;
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
-    LQFTNode* current_root = global_roots[shard].root;
-    if (current_root) {
-        char* result = core_search(h, current_root); 
-        if (result) safe_copy = portable_strdup(result); 
-    }
+    current_root = global_roots[shard].root;
+    if (current_root) ATOMIC_INC(&current_root->ref_count);
     LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+    if (current_root) {
+        char* result = core_search(h, current_root);
+        if (result) safe_copy = portable_strdup(result);
+        decref(current_root);
+    }
     Py_END_ALLOW_THREADS
     if (safe_copy) {
         PyObject* py_res = PyUnicode_FromString(safe_copy);
         free(safe_copy); return py_res;
     }
     Py_RETURN_NONE;
+}
+
+static PyObject* method_search_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    if (!key_str) return NULL;
+    uint64_t h = hash_key_string(key_str);
+    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+    char* safe_copy = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    LQFTNode* current_root = NULL;
+    LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+    current_root = global_roots[shard].root;
+    if (current_root) ATOMIC_INC(&current_root->ref_count);
+    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+    if (current_root) {
+        char* result = core_search(h, current_root);
+        if (result) safe_copy = portable_strdup(result);
+        decref(current_root);
+    }
+    Py_END_ALLOW_THREADS
+    if (safe_copy) {
+        PyObject* py_res = PyUnicode_FromString(safe_copy);
+        free(safe_copy);
+        return py_res;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject* method_contains(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
+    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+    int found = 0;
+    Py_BEGIN_ALLOW_THREADS
+    LQFTNode* current_root = NULL;
+    LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+    current_root = global_roots[shard].root;
+    if (current_root) ATOMIC_INC(&current_root->ref_count);
+    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+    if (current_root) {
+        if (core_search(h, current_root) != NULL) found = 1;
+        decref(current_root);
+    }
+    Py_END_ALLOW_THREADS
+    if (found) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject* method_contains_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    if (!key_str) return NULL;
+    uint64_t h = hash_key_string(key_str);
+    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+    int found = 0;
+    Py_BEGIN_ALLOW_THREADS
+    LQFTNode* current_root = NULL;
+    LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+    current_root = global_roots[shard].root;
+    if (current_root) ATOMIC_INC(&current_root->ref_count);
+    LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+    if (current_root) {
+        if (core_search(h, current_root) != NULL) found = 1;
+        decref(current_root);
+    }
+    Py_END_ALLOW_THREADS
+    if (found) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject* method_bulk_contains_count(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    PyObject* seq = PySequence_Fast(args[0], "bulk_contains_count expects a sequence of string keys");
+    if (!seq) return NULL;
+
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    if (n <= 0) {
+        Py_DECREF(seq);
+        return PyLong_FromLong(0);
+    }
+
+    uint64_t* hashes = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+    if (!hashes) {
+        Py_DECREF(seq);
+        return PyErr_NoMemory();
+    }
+
+    PyObject** items = PySequence_Fast_ITEMS(seq);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        const char* key_str = PyUnicode_AsUTF8(items[i]);
+        if (!key_str) {
+            free(hashes);
+            Py_DECREF(seq);
+            return NULL;
+        }
+        hashes[i] = hash_key_string(key_str);
+    }
+
+    Py_ssize_t hit_count = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < n; i++) {
+        uint64_t h = hashes[i];
+        uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+        LQFTNode* current_root = NULL;
+
+        LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+        current_root = global_roots[shard].root;
+        if (current_root) ATOMIC_INC(&current_root->ref_count);
+        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+
+        if (current_root) {
+            if (core_search(h, current_root) != NULL) hit_count++;
+            decref(current_root);
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    free(hashes);
+    Py_DECREF(seq);
+    return PyLong_FromSsize_t(hit_count);
+}
+
+static PyObject* method_bulk_contains_range_count(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 3) return NULL;
+    const char* prefix = PyUnicode_AsUTF8(args[0]);
+    if (!prefix) return NULL;
+    unsigned long long start = PyLong_AsUnsignedLongLong(args[1]);
+    if (PyErr_Occurred()) return NULL;
+    unsigned long long count = PyLong_AsUnsignedLongLong(args[2]);
+    if (PyErr_Occurred()) return NULL;
+
+    uint64_t prefix_hash = fnv1a_update(FNV_OFFSET_BASIS, prefix, strlen(prefix));
+    unsigned long long hit_count = 0;
+
+    Py_BEGIN_ALLOW_THREADS
+    for (unsigned long long i = 0; i < count; i++) {
+        uint64_t h = fnv1a_update_u64_decimal(prefix_hash, (uint64_t)(start + i));
+        uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+        LQFTNode* current_root = NULL;
+
+        LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+        current_root = global_roots[shard].root;
+        if (current_root) ATOMIC_INC(&current_root->ref_count);
+        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+
+        if (current_root) {
+            if (core_search(h, current_root) != NULL) hit_count++;
+            decref(current_root);
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    return PyLong_FromUnsignedLongLong(hit_count);
 }
 
 static PyObject* method_delete(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
@@ -1015,6 +1298,36 @@ static PyObject* method_delete(PyObject* self, PyObject* const* args, Py_ssize_t
     Py_RETURN_NONE;
 }
 
+static PyObject* method_delete_key(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 1) return NULL;
+    const char* key_str = PyUnicode_AsUTF8(args[0]);
+    if (!key_str) return NULL;
+    uint64_t h = hash_key_string(key_str);
+    uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
+    Py_BEGIN_ALLOW_THREADS
+    while(1) {
+        LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
+        LQFTNode* old_root = global_roots[shard].root;
+        if (old_root) ATOMIC_INC(&old_root->ref_count);
+        LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
+        LQFTNode* next = core_delete_internal(h, old_root);
+        LQFT_RWLOCK_WRLOCK(&root_locks[shard].lock);
+        if (global_roots[shard].root == old_root) {
+            global_roots[shard].root = next;
+            LQFT_RWLOCK_UNLOCK_WR(&root_locks[shard].lock);
+            if (old_root) { decref(old_root); decref(old_root); }
+            break;
+        } else {
+            LQFT_RWLOCK_UNLOCK_WR(&root_locks[shard].lock);
+            if (next) decref(next);
+            if (old_root) decref(old_root);
+            for(volatile int s = 0; s < 16; s++) { CPU_PAUSE; }
+        }
+    }
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
 static PyObject* method_get_metrics(PyObject* self, PyObject* args) { 
     int64_t total_phys_added = 0;
     int64_t total_phys_freed = 0;
@@ -1026,19 +1339,30 @@ static PyObject* method_get_metrics(PyObject* self, PyObject* args) {
     }
     int64_t net_phys = total_phys_added - total_phys_freed;
     double deduplication_ratio = net_phys > 0 ? (double)total_logical / (double)net_phys : 0.0;
-    return Py_BuildValue("{s:L, s:L, s:d}", "physical_nodes", net_phys, "logical_inserts", total_logical, "deduplication_ratio", deduplication_ratio); 
+    double value_pool_bytes_per_logical_insert = total_logical > 0
+        ? (double)value_pool_total_bytes / (double)total_logical
+        : 0.0;
+    return Py_BuildValue(
+        "{s:L, s:L, s:d, s:L, s:L, s:d}",
+        "physical_nodes", net_phys,
+        "logical_inserts", total_logical,
+        "deduplication_ratio", deduplication_ratio,
+        "value_pool_entries", value_pool_entry_count,
+        "value_pool_bytes", value_pool_total_bytes,
+        "value_pool_bytes_per_logical_insert", value_pool_bytes_per_logical_insert
+    );
 }
 
 static PyObject* method_free_all(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     for(int i = 0; i < NUM_ROOTS; i++) LQFT_RWLOCK_WRLOCK(&root_locks[i].lock);
     for(int i = 0; i < NUM_STRIPES; i++) fast_lock_backoff(&stripe_locks[i].flag);
-    if (registry) { 
+    if (registry) {
         for(int i = 0; i < NUM_STRIPES * STRIPE_SIZE; i++) {
-            if (registry[i] && registry[i] != TOMBSTONE) { if (registry[i]->value) free(registry[i]->value); } 
-            registry[i] = NULL; 
+            registry[i] = NULL;
         }
     }
+    value_pool_clear_all();
     fast_lock_backoff(&global_chunk_lock.flag);
     NodeChunk* nc = global_node_chunks;
     while(nc) { NodeChunk* n = nc->next_global; free_node_chunk(nc); nc = n; }
@@ -1082,8 +1406,17 @@ static PyObject* method_free_all(PyObject* self, PyObject* args) {
 
 static PyMethodDef LQFTMethods[] = {
     {"insert", (PyCFunction)method_insert, METH_FASTCALL, "Fast-path insert single key"},
+    {"insert_key_value", (PyCFunction)method_insert_key_value, METH_FASTCALL, "Insert using string key/value fast path"},
+    {"bulk_insert_keys", (PyCFunction)method_bulk_insert_keys, METH_FASTCALL, "Bulk insert string keys with one value"},
+    {"bulk_insert_range", (PyCFunction)method_bulk_insert_range, METH_FASTCALL, "Bulk insert generated keys prefix+index range"},
     {"search", (PyCFunction)method_search, METH_FASTCALL, "Fast-path search single key"},
+    {"search_key", (PyCFunction)method_search_key, METH_FASTCALL, "Search using string key fast path"},
+    {"contains", (PyCFunction)method_contains, METH_FASTCALL, "Contains check by pre-hashed key"},
+    {"contains_key", (PyCFunction)method_contains_key, METH_FASTCALL, "Contains check using string key fast path"},
+    {"bulk_contains_count", (PyCFunction)method_bulk_contains_count, METH_FASTCALL, "Bulk contains checks, returns hit count"},
+    {"bulk_contains_range_count", (PyCFunction)method_bulk_contains_range_count, METH_FASTCALL, "Bulk contains on generated keys prefix+index range"},
     {"delete", (PyCFunction)method_delete, METH_FASTCALL, "Fast-path delete single key"},
+    {"delete_key", (PyCFunction)method_delete_key, METH_FASTCALL, "Delete using string key fast path"},
     {"internal_stress_test", (PyCFunction)method_internal_stress_test, METH_FASTCALL, "Run native C stress test"},
     {"get_metrics", method_get_metrics, METH_VARARGS, "Get stats"},
     {"free_all", method_free_all, METH_VARARGS, "Wipe memory"},
@@ -1099,6 +1432,7 @@ PyMODINIT_FUNC PyInit_lqft_c_engine(void) {
     }
     registry = (LQFTNode**)calloc(NUM_STRIPES * STRIPE_SIZE, sizeof(LQFTNode*));
     for(int i = 0; i < NUM_STRIPES; i++) stripe_locks[i].flag = 0;
+    for(int i = 0; i < VALUE_POOL_BUCKETS; i++) value_pool_locks[i].flag = 0;
     for(int j = 0; j < 4; j++) {
         NodeChunk* nc = alloc_node_chunk();
         ChildChunk* cc = alloc_child_chunk();
@@ -1112,4 +1446,89 @@ PyMODINIT_FUNC PyInit_lqft_c_engine(void) {
     pthread_t bg_tid; pthread_create(&bg_tid, NULL, background_alloc_thread, NULL); pthread_detach(bg_tid); 
 #endif
     return PyModule_Create(&lqftmodule); 
+}
+
+static const char* value_acquire(const char* value_ptr) {
+    if (!value_ptr) return NULL;
+
+    uint64_t h = fnv1a_update(FNV_OFFSET_BASIS, value_ptr, strlen(value_ptr));
+    uint32_t bucket = (uint32_t)(h & (VALUE_POOL_BUCKETS - 1));
+
+    fast_lock_backoff(&value_pool_locks[bucket].flag);
+    ValueEntry* cur = value_pool[bucket];
+    while (cur) {
+        if (cur->hash == h && strcmp(cur->str, value_ptr) == 0) {
+            ATOMIC_INC(&cur->ref_count);
+            fast_unlock(&value_pool_locks[bucket].flag);
+            return cur->str;
+        }
+        cur = cur->next;
+    }
+
+    ValueEntry* e = (ValueEntry*)malloc(sizeof(ValueEntry));
+    if (!e) {
+        fast_unlock(&value_pool_locks[bucket].flag);
+        return NULL;
+    }
+    size_t value_len = strlen(value_ptr);
+    e->str = portable_strdup(value_ptr);
+    if (!e->str) {
+        free(e);
+        fast_unlock(&value_pool_locks[bucket].flag);
+        return NULL;
+    }
+    e->hash = h;
+    e->ref_count = 1;
+    e->next = value_pool[bucket];
+    value_pool[bucket] = e;
+    value_pool_entry_count += 1;
+    value_pool_total_bytes += (int64_t)(value_len + 1);
+    fast_unlock(&value_pool_locks[bucket].flag);
+    return e->str;
+}
+
+static void value_release(const char* value_ptr) {
+    if (!value_ptr) return;
+
+    uint64_t h = fnv1a_update(FNV_OFFSET_BASIS, value_ptr, strlen(value_ptr));
+    uint32_t bucket = (uint32_t)(h & (VALUE_POOL_BUCKETS - 1));
+
+    fast_lock_backoff(&value_pool_locks[bucket].flag);
+    ValueEntry* prev = NULL;
+    ValueEntry* cur = value_pool[bucket];
+    while (cur) {
+        if (cur->hash == h && (cur->str == value_ptr || strcmp(cur->str, value_ptr) == 0)) {
+            long new_ref = ATOMIC_DEC(&cur->ref_count);
+            if (new_ref == 0) {
+                if (prev) prev->next = cur->next;
+                else value_pool[bucket] = cur->next;
+                value_pool_entry_count -= 1;
+                value_pool_total_bytes -= (int64_t)(strlen(cur->str) + 1);
+                free(cur->str);
+                free(cur);
+            }
+            fast_unlock(&value_pool_locks[bucket].flag);
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    fast_unlock(&value_pool_locks[bucket].flag);
+}
+
+static void value_pool_clear_all(void) {
+    for (uint32_t b = 0; b < VALUE_POOL_BUCKETS; b++) {
+        fast_lock_backoff(&value_pool_locks[b].flag);
+        ValueEntry* cur = value_pool[b];
+        while (cur) {
+            ValueEntry* next = cur->next;
+            free(cur->str);
+            free(cur);
+            cur = next;
+        }
+        value_pool[b] = NULL;
+        fast_unlock(&value_pool_locks[b].flag);
+    }
+    value_pool_entry_count = 0;
+    value_pool_total_bytes = 0;
 }
