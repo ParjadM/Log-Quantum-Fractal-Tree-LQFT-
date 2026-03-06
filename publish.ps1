@@ -1,17 +1,17 @@
-# LQFT Production Release (v1.0.7 Gold Master)
+# LQFT Production Release (v1.0.8 Gold Master)
 # Architect: Parjad Minooei
 # Target: McMaster B.Tech Portfolio
 
-$Version = "v1.0.7"
+$Version = "v1.0.8"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " 🚀 INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
 Write-Host "==========================================================" -ForegroundColor Magenta
 
 # 1. PURGE EXPERIMENTAL FILES
-# 1.0.7 FIX: Aggressively removing ALL legacy benchmarks that crash CI/CD
+# 1.0.8 FIX: Aggressively removing ALL legacy benchmarks that crash CI/CD
 $Extras = @(
-    "test1.py", "v096_concurrency_showdown.py", 
+    "test1.py", 
     "stress_test_10m.py", "consistency_audit.py", "validation.py", 
     "benchmark.py", "test_lqft.py", "comprehensive_benchmark.py", 
     "adaptive_benchmark.py", "trie_vs_lqft_benchmark.py", "graph_vs_lqft.py", 
@@ -22,8 +22,8 @@ $Extras = @(
     "stress_test_memory_win.py", "initialize_lqft.py", "integrity_check_v44.py", 
     "stress_test_large_payload.py", "enterprise_capability_suite.py", 
     "pre_release_suite.py", "make_readme.py", "gil_bypass_test.py", 
-    "lqft_final_validation.py", "v087_saturation_test.py", "density_test.py", 
-    "crud_benchmark.py", "test_v090_wrapper.py", "showdown_test.py", 
+    "lqft_final_validation.py", "density_test.py", 
+    "crud_benchmark.py", "showdown_test.py", 
     "comprehensive_ranking.py", "leak_test.py", "leak_verification.py",
     "sharded_lock_benchmark.py"
 )

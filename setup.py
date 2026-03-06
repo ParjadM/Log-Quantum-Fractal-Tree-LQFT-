@@ -3,7 +3,7 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V1.0.7 (Apple Silicon M3 Hotfix)
+# LQFT BUILD SYSTEM - V1.0.8 (Stability Build)
 # Architect: Parjad Minooei
 # ---------------------------------------------------------
 
@@ -40,8 +40,8 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="1.0.7", 
-    description="LQFT Engine: 14.3M Ops/sec O(1) Time | O(Σ) Space Data Structure",
+    version="1.0.8", 
+    description="LQFT Engine: native C extension with bounded-depth lookups and structural sharing",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Parjad Minooei",

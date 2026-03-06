@@ -2,7 +2,7 @@
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](#)
 [![C-Engine](https://img.shields.io/badge/Native-C-red.svg)](#)
-[![Concurrency](https://img.shields.io/badge/Concurrency-14.3M_Ops%2Fsec-success.svg)](#)
+[![Concurrency](https://img.shields.io/badge/Concurrency-Benchmark_Dependent-yellow.svg)](#)
 [![Architecture](https://img.shields.io/badge/Architecture-Merkle_HAMT-pink.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE.md)
 
@@ -14,16 +14,18 @@ The **Log-Quantum Fractal Tree (LQFT)** is a high-performance, scale-invariant d
 
 ---
 
-## 🏆 Performance Certification (v1.0.7 Stable)
+## 🏆 Performance Snapshot (v1.0.8 Stable)
 
 *Verified Environment: Python 3.12 | MSYS2/MinGW64 GCC -O3 | 16-Core Physical Affinity*
 
-| Metric | Certified Result | Architectural Driver |
+| Metric | Current Observation | Architectural Driver |
 | :--- | :--- | :--- |
-| **Peak Throughput** | **14,395,262 ops/sec** | Native OS Thread Affinity & Zero-Copy FFI |
-| **Search Latency** | **< 100 ns (L1 Cache)** | Grandchild Look-Ahead Software Prefetching |
+| **Insert Throughput (wrapper microbench)** | **~600k ops/sec class** | Buffered batch writes + native C bulk path |
+| **Search Throughput (wrapper microbench)** | **~900k ops/sec class** | Fixed-depth traversal + native search path |
 | **Memory Density** | **~104 Bytes / Node** | NUMA-Aware Slab Allocator (Background Daemon) |
 | **Space Efficiency** | **1,500x Reduction** | Global Atomic Pool Stealing & Merkle-DAG Folding |
+
+Benchmark note: Throughput is workload- and environment-dependent. Use the repo benchmark scripts to reproduce numbers for your hardware.
 
 ## 🧠 Core Architecture 
 
@@ -66,7 +68,7 @@ import lqft_c_engine
 # Send raw C-arrays directly to the engine to bypass the GIL entirely
 lqft_c_engine.insert_batch_raw(bytes(raw_buffer_array), "enterprise_payload")
 
-# 14.3M Ops/sec Native Search
+# Native Search (throughput depends on workload/profile)
 result = lqft_c_engine.search(0x123456789ABCDEF)
 
 # Fetch internal hardware metrics

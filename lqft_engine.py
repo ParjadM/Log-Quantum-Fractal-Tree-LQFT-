@@ -41,6 +41,9 @@ class LQFT:
         "_native_bulk_contains_count",
         "_native_bulk_insert_range",
         "_native_bulk_contains_range_count",
+        "_pending_keys",
+        "_pending_value",
+        "_pending_batch_size",
     )
 
     # F-03 & F-04: Restored migration_threshold to sync API signatures across the suite
@@ -61,6 +64,9 @@ class LQFT:
         self._native_bulk_contains_count = getattr(lqft_c_engine, "bulk_contains_count", None)
         self._native_bulk_insert_range = getattr(lqft_c_engine, "bulk_insert_range", None)
         self._native_bulk_contains_range_count = getattr(lqft_c_engine, "bulk_contains_range_count", None)
+        self._pending_keys = []
+        self._pending_value = None
+        self._pending_batch_size = 2048
         with LQFT._instance_lock:
             LQFT._live_instances += 1
 
@@ -73,6 +79,28 @@ class LQFT:
     def _get_64bit_hash(self, key):
         # Deterministic 64-bit hash keeps key mapping stable across processes/runs.
         return int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "little")
+
+    def _flush_pending_inserts(self):
+        if not self._pending_keys:
+            return
+
+        keys = self._pending_keys
+        value = self._pending_value
+        self._pending_keys = []
+        self._pending_value = None
+
+        if self._native_bulk_insert_keys is not None:
+            self._native_bulk_insert_keys(keys, value)
+            return
+
+        if self._native_insert_kv is not None:
+            for key in keys:
+                self._native_insert_kv(key, value)
+            return
+
+        for key in keys:
+            h = self._get_64bit_hash(key)
+            lqft_c_engine.insert(h, value)
 
     def _current_memory_mb(self):
         if self._process is None:
@@ -131,6 +159,14 @@ class LQFT:
     def disable_auto_purge(self):
         self.auto_purge_enabled = False
 
+    def set_write_batch_size(self, batch_size: int):
+        batch_size = int(batch_size)
+        if batch_size <= 0:
+            raise ValueError("Write batch size must be > 0.")
+        if self._pending_keys:
+            self._flush_pending_inserts()
+        self._pending_batch_size = batch_size
+
     def purge(self):
         current_mb = self._current_memory_mb()
         with LQFT._instance_lock:
@@ -145,6 +181,8 @@ class LQFT:
         self.clear()
 
     def get_stats(self):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         return lqft_c_engine.get_metrics()
 
     # F-02: Standardized Metric Mapping (Dunder Method)
@@ -155,6 +193,8 @@ class LQFT:
         return stats.get('logical_inserts', 0)
 
     def clear(self):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         # Global clear (shared native state). Keep explicit to avoid accidental data loss.
         return lqft_c_engine.free_all()
 
@@ -172,6 +212,17 @@ class LQFT:
                 if current_mb >= self.max_memory_mb:
                     self.purge()
 
+        if self._native_bulk_insert_keys is not None:
+            if self._pending_value is None:
+                self._pending_value = value
+            if value != self._pending_value:
+                self._flush_pending_inserts()
+                self._pending_value = value
+            self._pending_keys.append(key)
+            if len(self._pending_keys) >= self._pending_batch_size:
+                self._flush_pending_inserts()
+            return
+
         if self._native_insert_kv is not None:
             self._native_insert_kv(key, value)
             return
@@ -180,21 +231,23 @@ class LQFT:
         lqft_c_engine.insert(h, value)
 
     def search(self, key):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if type(key) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if self._native_search_key is not None:
             return self._native_search_key(key)
-
         h = self._get_64bit_hash(key)
         return lqft_c_engine.search(h)
 
     def remove(self, key):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if type(key) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if self._native_delete_key is not None:
             self._native_delete_key(key)
             return
-
         h = self._get_64bit_hash(key)
         if hasattr(lqft_c_engine, 'delete'):
             lqft_c_engine.delete(h)
@@ -203,6 +256,8 @@ class LQFT:
         self.remove(key)
 
     def contains(self, key):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if type(key) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(key).__name__}")
         if self._native_contains_key is not None:
@@ -212,6 +267,8 @@ class LQFT:
     def bulk_insert(self, keys, value):
         if type(value) is not str:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if self._native_bulk_insert_keys is not None:
             self._native_bulk_insert_keys(keys, value)
             return
@@ -219,6 +276,8 @@ class LQFT:
             self.insert(key, value)
 
     def bulk_contains_count(self, keys):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if self._native_bulk_contains_count is not None:
             return int(self._native_bulk_contains_count(keys))
         count = 0
@@ -232,6 +291,8 @@ class LQFT:
             raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
         if type(value) is not str:
             raise TypeError(f"LQFT values must be strings. Received: {type(value).__name__}")
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if self._native_bulk_insert_range is not None:
             self._native_bulk_insert_range(prefix, int(start), int(count), value)
             return
@@ -240,6 +301,8 @@ class LQFT:
             self.insert(f"{prefix}{i}", value)
 
     def bulk_contains_range_count(self, prefix, start, count):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         if type(prefix) is not str:
             raise TypeError(f"LQFT keys must be strings. Received: {type(prefix).__name__}")
         if self._native_bulk_contains_range_count is not None:
@@ -255,6 +318,8 @@ class LQFT:
         self.insert(key, value)
 
     def __getitem__(self, key):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         res = self.search(key)
         if res is None:
             raise KeyError(key)
@@ -265,6 +330,8 @@ class LQFT:
 
     def __del__(self):
         try:
+            if self._pending_keys:
+                self._flush_pending_inserts()
             if not self._closed:
                 with LQFT._instance_lock:
                     LQFT._live_instances = max(0, LQFT._live_instances - 1)
@@ -273,6 +340,8 @@ class LQFT:
             pass
 
     def status(self):
+        if self._pending_keys:
+            self._flush_pending_inserts()
         return {
             "mode": "Strict Native C-Engine (Arena Allocator)",
             "items": lqft_c_engine.get_metrics().get('physical_nodes', 0),

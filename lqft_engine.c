@@ -1025,6 +1025,9 @@ static PyObject* method_insert_key_value(PyObject* self, PyObject* const* args, 
     Py_RETURN_NONE;
 }
 
+static THREAD_LOCAL uint64_t* tls_bulk_hashes = NULL;
+static THREAD_LOCAL Py_ssize_t tls_bulk_hashes_cap = 0;
+
 static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 2) return NULL;
     PyObject* seq = PySequence_Fast(args[0], "bulk_insert_keys expects a sequence of string keys");
@@ -1042,17 +1045,21 @@ static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, 
         Py_RETURN_NONE;
     }
 
-    uint64_t* hashes = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
-    if (!hashes) {
-        Py_DECREF(seq);
-        return PyErr_NoMemory();
+    if (n > tls_bulk_hashes_cap) {
+        uint64_t* grown = (uint64_t*)realloc(tls_bulk_hashes, (size_t)n * sizeof(uint64_t));
+        if (!grown) {
+            Py_DECREF(seq);
+            return PyErr_NoMemory();
+        }
+        tls_bulk_hashes = grown;
+        tls_bulk_hashes_cap = n;
     }
+    uint64_t* hashes = tls_bulk_hashes;
 
     PyObject** items = PySequence_Fast_ITEMS(seq);
     for (Py_ssize_t i = 0; i < n; i++) {
         const char* key_str = PyUnicode_AsUTF8(items[i]);
         if (!key_str) {
-            free(hashes);
             Py_DECREF(seq);
             return NULL;
         }
@@ -1065,7 +1072,6 @@ static PyObject* method_bulk_insert_keys(PyObject* self, PyObject* const* args, 
     }
     Py_END_ALLOW_THREADS
 
-    free(hashes);
     Py_DECREF(seq);
     Py_RETURN_NONE;
 }
@@ -1096,23 +1102,27 @@ static PyObject* method_search(PyObject* self, PyObject* const* args, Py_ssize_t
     if (nargs != 1) return NULL;
     uint64_t h = PyLong_AsUnsignedLongLongMask(args[0]);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-    char* safe_copy = NULL; 
-    Py_BEGIN_ALLOW_THREADS
+    const char* result_ptr = NULL;
     LQFTNode* current_root = NULL;
+    Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
     current_root = global_roots[shard].root;
     if (current_root) ATOMIC_INC(&current_root->ref_count);
     LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
     if (current_root) {
-        char* result = core_search(h, current_root);
-        if (result) safe_copy = portable_strdup(result);
-        decref(current_root);
+        result_ptr = core_search(h, current_root);
     }
     Py_END_ALLOW_THREADS
-    if (safe_copy) {
-        PyObject* py_res = PyUnicode_FromString(safe_copy);
-        free(safe_copy); return py_res;
+
+    if (current_root) {
+        PyObject* py_res = NULL;
+        if (result_ptr) {
+            py_res = PyUnicode_FromString(result_ptr);
+        }
+        decref(current_root);
+        if (py_res) return py_res;
     }
+
     Py_RETURN_NONE;
 }
 
@@ -1122,24 +1132,27 @@ static PyObject* method_search_key(PyObject* self, PyObject* const* args, Py_ssi
     if (!key_str) return NULL;
     uint64_t h = hash_key_string(key_str);
     uint32_t shard = (uint32_t)((h >> 48) & ROOT_MASK);
-    char* safe_copy = NULL;
-    Py_BEGIN_ALLOW_THREADS
+    const char* result_ptr = NULL;
     LQFTNode* current_root = NULL;
+    Py_BEGIN_ALLOW_THREADS
     LQFT_RWLOCK_RDLOCK(&root_locks[shard].lock);
     current_root = global_roots[shard].root;
     if (current_root) ATOMIC_INC(&current_root->ref_count);
     LQFT_RWLOCK_UNLOCK_RD(&root_locks[shard].lock);
     if (current_root) {
-        char* result = core_search(h, current_root);
-        if (result) safe_copy = portable_strdup(result);
-        decref(current_root);
+        result_ptr = core_search(h, current_root);
     }
     Py_END_ALLOW_THREADS
-    if (safe_copy) {
-        PyObject* py_res = PyUnicode_FromString(safe_copy);
-        free(safe_copy);
-        return py_res;
+
+    if (current_root) {
+        PyObject* py_res = NULL;
+        if (result_ptr) {
+            py_res = PyUnicode_FromString(result_ptr);
+        }
+        decref(current_root);
+        if (py_res) return py_res;
     }
+
     Py_RETURN_NONE;
 }
 
