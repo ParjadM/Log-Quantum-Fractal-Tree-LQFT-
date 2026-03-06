@@ -31,7 +31,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Available built wheels:"
           ls -1 wheelhouse/*.whl
-          python -m pip install --no-index --find-links wheelhouse "lqft-python-engine==${VERSION}"
+          python -m pip install psutil
+          python -m pip install --no-deps --no-index --find-links wheelhouse "lqft-python-engine==${VERSION}"
           python -c "import lqft_engine; engine = lqft_engine.LQFT(); print(type(engine).__name__)"
 
       - uses: actions/upload-artifact@v4
