@@ -24,28 +24,14 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.5
 
-      - name: Smoke test built cp312 wheel
+      - name: Smoke test built wheel
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python - <<'PY'
-          import glob
-          import subprocess
-          import sys
-
-          matches = sorted(glob.glob("wheelhouse/*cp312*.whl"))
-          if not matches:
-            available = sorted(glob.glob("wheelhouse/*.whl"))
-            listing = "\n".join(available) if available else "<no wheels found in wheelhouse>"
-            raise SystemExit(
-              "Expected a cp312 wheel in wheelhouse, but none was found. Available wheels:\n"
-              + listing
-            )
-
-          wheel_path = matches[0]
-          print(f"Installing smoke-test wheel: {wheel_path}")
-          subprocess.check_call([sys.executable, "-m", "pip", "install", wheel_path])
-          PY
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Available built wheels:"
+          ls -1 wheelhouse/*.whl
+          python -m pip install --no-index --find-links wheelhouse "lqft-python-engine==${VERSION}"
           python -c "import lqft_engine; engine = lqft_engine.LQFT(); print(type(engine).__name__)"
 
       - uses: actions/upload-artifact@v4

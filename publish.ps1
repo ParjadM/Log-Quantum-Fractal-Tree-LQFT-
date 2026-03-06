@@ -1,8 +1,8 @@
-# LQFT Production Release (v1.1.3)
+# LQFT Production Release (v1.1.4)
 # Architect: Parjad Minooei
 # Target: McMaster B.Tech Portfolio
 
-$Version = "v1.1.3"
+$Version = "v1.1.4"
 
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host " INITIATING MCMASTER PORTFOLIO RELEASE: $Version" -ForegroundColor Magenta
