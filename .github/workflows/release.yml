@@ -33,7 +33,25 @@ jobs:
           ls -1 wheelhouse/*.whl
           python -m pip install psutil
           python -m pip install --no-deps --no-index --find-links wheelhouse "lqft-python-engine==${VERSION}"
-          python -c "import lqft_engine; engine = lqft_engine.LQFT(); print(type(engine).__name__)"
+          pushd /tmp >/dev/null
+          python - <<'PY'
+          import lqft_engine
+
+          required_symbols = [
+            "LQFT",
+            "MutableLQFT",
+            "LQFTMap",
+            "LQFTSnapshot",
+            "LQFTStorageEngine",
+            "LQFTShardedMap",
+            "LQFTShardedStorageEngine",
+          ]
+          for symbol in required_symbols:
+            assert hasattr(lqft_engine, symbol), f"missing symbol: {symbol}"
+
+          print("wheel smoke test passed")
+          PY
+          popd >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:

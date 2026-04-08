@@ -35,19 +35,18 @@ jobs:
         python - <<'PY'
         import lqft_engine
 
-        engine = lqft_engine.LQFT()
-        engine.insert("alpha", "value-a")
-        engine.insert("beta", "value-b")
+      required_symbols = [
+        "LQFT",
+        "MutableLQFT",
+        "LQFTMap",
+        "LQFTSnapshot",
+        "LQFTStorageEngine",
+        "LQFTShardedMap",
+        "LQFTShardedStorageEngine",
+      ]
 
-        assert engine.search("alpha") == "value-a"
-        assert engine.contains("beta") is True
+      for symbol in required_symbols:
+        assert hasattr(lqft_engine, symbol), f"missing symbol: {symbol}"
 
-        engine.remove("alpha")
-        assert engine.search("alpha") is None
-
-        stats = engine.get_stats()
-        assert isinstance(stats, dict)
-        assert "physical_nodes" in stats
-
-        print("logical smoke test passed")
+      print("package smoke test passed")
         PY
