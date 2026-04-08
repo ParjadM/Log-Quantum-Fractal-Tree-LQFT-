@@ -13,7 +13,7 @@ The **Log-Quantum Fractal Tree (LQFT)** is a native Python extension that combin
 
 ---
 
-## Release Note (v1.2.0)
+## Release Note (v1.2.1)
 
 This release keeps the paired key/value batching patch and native mutable frontend improvements, closes the Phase 2 product-model unification pass with the wrapper-level `LQFTMap` as the intended primary entry point, and materially advances the Phase 4 commit pipeline with native tombstones and a one-shot delta-commit path.
 
@@ -38,14 +38,14 @@ What did not improve:
 
 Practical claim for this release:
 
-- v1.2.0 now exposes one intended high-level model, `LQFTMap`, while retaining `LQFT` and `MutableLQFT` as compatibility surfaces.
-- v1.2.0 is a substantially better mutable/write-heavy LQFT than earlier releases.
-- v1.2.0 also has a materially stronger mutable-to-persistent commit path for snapshot-oriented workloads, especially when deletes are part of the delta.
-- v1.2.0 is not a proof that LQFT beats common in-memory data structures overall.
+- v1.2.1 now exposes one intended high-level model, `LQFTMap`, while retaining `LQFT` and `MutableLQFT` as compatibility surfaces.
+- v1.2.1 is a substantially better mutable/write-heavy LQFT than earlier releases.
+- v1.2.1 also has a materially stronger mutable-to-persistent commit path for snapshot-oriented workloads, especially when deletes are part of the delta.
+- v1.2.1 is not a proof that LQFT beats common in-memory data structures overall.
 
 ---
 
-## Performance Snapshot (v1.2.0)
+## Performance Snapshot (v1.2.1)
 
 Verified environment: Windows workstation, Python 3.14 local build, native extension compiled in-place, benchmark matrix used during development before packaging cleanup.
 
