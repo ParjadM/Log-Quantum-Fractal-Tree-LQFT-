@@ -35,18 +35,18 @@ jobs:
         python - <<'PY'
         import lqft_engine
 
-      required_symbols = [
-        "LQFT",
-        "MutableLQFT",
-        "LQFTMap",
-        "LQFTSnapshot",
-        "LQFTStorageEngine",
-        "LQFTShardedMap",
-        "LQFTShardedStorageEngine",
-      ]
+        required_symbols = [
+            "LQFT",
+            "MutableLQFT",
+            "LQFTMap",
+            "LQFTSnapshot",
+            "LQFTStorageEngine",
+            "LQFTShardedMap",
+            "LQFTShardedStorageEngine",
+        ]
 
-      for symbol in required_symbols:
-        assert hasattr(lqft_engine, symbol), f"missing symbol: {symbol}"
+        for symbol in required_symbols:
+            assert hasattr(lqft_engine, symbol), f"missing symbol: {symbol}"
 
-      print("package smoke test passed")
+        print("package smoke test passed")
         PY
