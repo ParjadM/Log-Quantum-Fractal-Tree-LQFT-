@@ -3,7 +3,7 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V1.1.6
+# LQFT BUILD SYSTEM - V1.2.0
 # Architect: Parjad Minooei
 # ---------------------------------------------------------
 
@@ -40,7 +40,7 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="1.1.6",
+    version="1.2.0",
     description="LQFT Engine: native C extension exposing LQFT and MutableLQFT with improved mutable and native-backed performance",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -49,7 +49,7 @@ setup(
     ext_modules=[lqft_extension],
     packages=find_packages(),
     py_modules=["lqft_engine"], 
-    install_requires=['psutil'],
+    install_requires=['psutil', 'cryptography'],
     license="MIT",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
