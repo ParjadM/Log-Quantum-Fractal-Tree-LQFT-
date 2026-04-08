@@ -3,7 +3,7 @@ import os
 import sys
 
 # ---------------------------------------------------------
-# LQFT BUILD SYSTEM - V1.2.1
+# LQFT BUILD SYSTEM - V1.2.2
 # Architect: Parjad Minooei
 # ---------------------------------------------------------
 
@@ -40,7 +40,7 @@ lqft_extension = Extension(
 
 setup(
     name="lqft-python-engine",
-    version="1.2.1",
+    version="1.2.2",
     description="LQFT Engine: native C extension exposing LQFT and MutableLQFT with improved mutable and native-backed performance",
     long_description=long_description,
     long_description_content_type="text/markdown",
